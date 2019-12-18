@@ -21,7 +21,7 @@ fn disasm(bytes: &[u8], offset: &mut usize) -> String {
         // and are concatenated together
         0000 ss dd => format!("add r{}, r{}", d, s),
         0001 ss dd => format!("sub r{}, r{}", d, s),
-        0010 ss dd => format!("or r{}, r{}",  d, s),
+        0010 ss dd => format!("or  r{}, r{}",  d, s),
         0011 ss dd => format!("xor r{}, r{}", d, s),
         0100 ss dd => format!("and r{}, r{}", d, s),
         0101 nn dd => format!("rsh r{}, {}", d, n + 1),
@@ -38,9 +38,9 @@ fn disasm(bytes: &[u8], offset: &mut usize) -> String {
         1101 xx xx => format!("invalid"),
         1110 xx xx => format!("invalid"),
 
-        1111 00 dd iiiiiiii          => format!("li r{}, #{}", d, i),
+        1111 00 dd iiiiiiii          => format!("lu r{}, #{}", d, i),
         1111 01 dd iiiiiiii          => format!("li r{}, #{}", d, i),
-        1111 10 dd iiiiiiii iiiiiiii => format!("li r{}, #{}", d, i),
+        1111 10 dd iiiiiiii iiiiiiii => format!("lu r{}, #{}", d, i),
         1111 11 dd iiiiiiii iiiiiiii => format!("li r{}, #{}", d, i),
     }
 }
