@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_quote, Expr, Ident, LitInt, Stmt, Type};
 
-use crate::{MatchBranchArm, MatchEntry, MatchTree};
+use crate::{BitReader, MatchBranchArm, MatchEntry, MatchTree};
 
 #[derive(Clone)]
 pub(crate) struct DecoderState<'a> {
@@ -13,11 +13,11 @@ pub(crate) struct DecoderState<'a> {
     subtree_values: Vec<(usize, Ident)>,
 
     /// Stores expressions that can be used to retrieve bytes from some source.
-    read_exprs: &'a [(usize, Expr)],
+    read_exprs: &'a [BitReader],
 }
 
 impl<'a> DecoderState<'a> {
-    pub fn new(read_exprs: &'a [(usize, Expr)]) -> Self {
+    pub fn new(read_exprs: &'a [BitReader]) -> Self {
         Self { subtree_values: vec![], read_exprs }
     }
 
@@ -98,8 +98,8 @@ impl<'a> DecoderState<'a> {
 
         // Get the smallest possible read expression
         let last = || self.read_exprs.last().expect("At least 1 read expression is required");
-        let (len, read_expr) =
-            self.read_exprs.iter().find(|(len, _)| *len >= new_bits).unwrap_or_else(last);
+        let BitReader { num_bits: len, expr: read_expr } =
+            self.read_exprs.iter().find(|r| r.num_bits >= new_bits).unwrap_or_else(last);
 
         self.subtree_values.push((*len, next_ident.clone()));
         Some(parse_quote!(let #next_ident = #read_expr;))

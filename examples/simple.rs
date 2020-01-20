@@ -5,7 +5,7 @@ fn main() {
     let bytes = &[
         0xf6, 0x64, // mov a, 100
         0xf3, 0xFF, // mov b, -1
-        0x0b        // add a, b
+        0x0b, // add a, b
     ];
     println!("{:?}", decode(bytes, &mut offset));
     println!("{:?}", decode(bytes, &mut offset));
@@ -53,29 +53,36 @@ fn decode(bytes: &[u8], offset: &mut usize) -> Instruction {
         // Specify to the bit-match macro that 8 bits can be read by calling the `read_u8` function
         read 8 => read_u8();
 
-        0000 ss dd => Instruction::Op(Op::Add, reg(d), reg(s)),
-        0001 ss dd => Instruction::Op(Op::Sub, reg(d), reg(s)),
-        0010 ss dd => Instruction::Op(Op::Or,  reg(d), reg(s)),
-        0011 ss dd => Instruction::Op(Op::Xor, reg(d), reg(s)),
-        0100 ss dd => Instruction::Op(Op::And, reg(d), reg(s)),
+        var src = 2;
+        var dst = 2;
+        var imm8 = 8;
+        var imm16 = 16;
+        var cond = 4;
+        var shift = 2;
 
-        0101 nn dd => Instruction::OpImm(Op::Rsh, reg(d), n as u32 + 1),
-        0110 nn dd => Instruction::OpImm(Op::Lsh, reg(d), n as u32 + 1),
-        0111 nn dd => Instruction::Invalid,
+        0000 src dst => Instruction::Op(Op::Add, reg(dst), reg(src)),
+        0001 src dst => Instruction::Op(Op::Sub, reg(dst), reg(src)),
+        0010 src dst => Instruction::Op(Op::Or,  reg(dst), reg(src)),
+        0011 src dst => Instruction::Op(Op::Xor, reg(dst), reg(src)),
+        0100 src dst => Instruction::Op(Op::And, reg(dst), reg(src)),
 
-        1000 ss dd iiiiiiii => Instruction::Load(reg(d), reg(s), i as u32),
-        1001 ss dd iiiiiiii => Instruction::Store(reg(d), reg(s), i as u32),
+        0101 shift dst => Instruction::OpImm(Op::Rsh, reg(dst), shift as u32 + 1),
+        0110 shift dst => Instruction::OpImm(Op::Lsh, reg(dst), shift as u32 + 1),
+        0111 shift dst => Instruction::Invalid,
 
-        1010 cc cc => Instruction::Branch(c),
-        1011 xx xx => Instruction::Invalid,
-        1100 xx xx => Instruction::Invalid,
-        1101 xx xx => Instruction::Invalid,
-        1110 xx xx => Instruction::Invalid,
+        1000 src dst imm8 => Instruction::Load(reg(dst), reg(src), imm8 as u32),
+        1001 src dst imm8 => Instruction::Store(reg(dst), reg(src), imm8 as u32),
 
-        1111 00 dd iiiiiiii          => Instruction::OpImm(Op::Mov, reg(d), sxt_8(i)),
-        1111 01 dd iiiiiiii          => Instruction::OpImm(Op::Mov, reg(d), zxt_8(i)),
-        1111 10 dd iiiiiiii iiiiiiii => Instruction::OpImm(Op::Mov, reg(d), sxt_16(i)),
-        1111 11 dd iiiiiiii iiiiiiii => Instruction::OpImm(Op::Mov, reg(d), zxt_16(i)),
+        1010 cond => Instruction::Branch(cond),
+        1011 xxxx => Instruction::Invalid,
+        1100 xxxx => Instruction::Invalid,
+        1101 xxxx => Instruction::Invalid,
+        1110 xxxx => Instruction::Invalid,
+
+        1111 00 dst imm8  => Instruction::OpImm(Op::Mov, reg(dst), sxt_8(imm8)),
+        1111 01 dst imm8  => Instruction::OpImm(Op::Mov, reg(dst), zxt_8(imm8)),
+        1111 10 dst imm16 => Instruction::OpImm(Op::Mov, reg(dst), sxt_16(imm16)),
+        1111 11 dst imm16 => Instruction::OpImm(Op::Mov, reg(dst), zxt_16(imm16)),
     }
 }
 
