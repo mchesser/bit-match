@@ -1,7 +1,7 @@
-use std::{collections::HashMap, iter};
+use std::collections::HashMap;
 
 use syn::parse::{Parse, ParseStream};
-use syn::{Expr, Ident, LitInt, Result, Token};
+use syn::{punctuated::Punctuated, Expr, Ident, LitInt, Result, Token};
 
 mod kw {
     syn::custom_keyword!(read);
@@ -10,7 +10,7 @@ mod kw {
 }
 
 /// The fully parsed bit match input
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BitMatchInput {
     pub readers: Vec<BitReader>,
     pub matches: Vec<MatchEntry>,
@@ -21,7 +21,7 @@ impl Parse for BitMatchInput {
         let mut readers = vec![];
         let mut matches = vec![];
 
-        let mut symbol_table = HashMap::new();
+        let mut symbol_table = SymbolTable::default();
 
         while !input.is_empty() {
             let lookahead = input.lookahead1();
@@ -29,20 +29,19 @@ impl Parse for BitMatchInput {
                 readers.push(input.parse()?)
             }
             else if lookahead.peek(Token![const]) {
-                let symbol = Symbol::parse_const(&mut input)?;
-                symbol_table.insert(symbol.name, symbol.value);
+                symbol_table.parse_const(&mut input)?;
             }
             else if lookahead.peek(kw::var) {
-                let symbol = Symbol::parse_var(&mut input)?;
-                symbol_table.insert(symbol.name, symbol.value);
+                symbol_table.parse_var(&mut input)?;
             }
             else if lookahead.peek(kw::pattern) {
-                panic!("`pattern` expressions are not currently supported");
+                symbol_table.parse_pattern_def(&mut input)?;
             }
             else {
                 matches.push(MatchEntry::parse(&mut input, &symbol_table)?);
 
                 // Parse optional `,` token after each entry
+
                 let lookahead = input.lookahead1();
                 if lookahead.peek(Token![,]) {
                     input.parse::<Token![,]>()?;
@@ -79,40 +78,70 @@ impl Parse for BitReader {
     }
 }
 
-#[derive(Debug)]
-enum SymbolValue {
-    Const(Vec<bool>),
-    Var(usize),
+#[derive(Clone, Default)]
+struct SymbolTable {
+    values: HashMap<String, SymbolValue>,
+    patterns: HashMap<String, PatternDef>,
 }
 
-#[derive(Debug)]
-struct Symbol {
-    name: String,
-    value: SymbolValue,
-}
-
-impl Symbol {
-    // Parse statement of the form: `const <ident> = <bit string>;
-    fn parse_const(input: &mut ParseStream) -> Result<Self> {
+impl SymbolTable {
+    /// Parse statement of the form: `const <ident> = <bit string>;
+    fn parse_const(&mut self, input: &mut ParseStream) -> Result<()> {
         input.parse::<Token![const]>()?;
         let name = input.parse::<Ident>()?.to_string();
         input.parse::<Token![=]>()?;
         let pattern = parse_fixed_bits(input, true)?;
         input.parse::<Token![;]>()?;
 
-        Ok(Self { name, value: SymbolValue::Const(pattern) })
+        self.values.insert(name, SymbolValue::Const(pattern));
+        Ok(())
     }
 
-    // Parse statement of the form: `var <ident> = <num-bits>;
-    fn parse_var(input: &mut ParseStream) -> Result<Self> {
+    /// Parse statement of the form: `var <ident> = <num-bits>;
+    fn parse_var(&mut self, input: &mut ParseStream) -> Result<()> {
         input.parse::<kw::var>()?;
         let name = input.parse::<Ident>()?.to_string();
-        input.parse::<Token![=]>()?;
+        input.parse::<Token![:]>()?;
         let num_bits = input.parse::<LitInt>()?.base10_parse()?;
         input.parse::<Token![;]>()?;
 
-        Ok(Self { name, value: SymbolValue::Var(num_bits) })
+        self.values.insert(name, SymbolValue::Var(num_bits));
+        Ok(())
     }
+
+    fn parse_pattern_def(&mut self, input: &mut ParseStream) -> Result<()> {
+        input.parse::<kw::pattern>()?;
+        let name = input.parse::<Ident>()?.to_string();
+
+        // Parse pattern args
+        let content;
+        syn::parenthesized!(content in input);
+        let args: Punctuated<Ident, Token![,]> = content.parse_terminated(Ident::parse)?;
+
+        input.parse::<Token![=>]>()?;
+
+        // Parse pattern body
+        let content;
+        syn::parenthesized!(content in input);
+        let pattern = PatternDef { args: args.into_iter().collect(), body: content.parse()? };
+        input.parse::<Token![;]>()?;
+
+        self.patterns.insert(name, pattern);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SymbolValue {
+    Const(Vec<bool>),
+    Var(usize),
+    Indirect(String),
+}
+
+#[derive(Debug, Clone)]
+struct PatternDef {
+    args: Vec<Ident>,
+    body: proc_macro2::TokenStream,
 }
 
 /// A pattern component representing variable bits
@@ -125,10 +154,10 @@ pub struct Variable {
 /// Represents a fully parsed match arm
 #[derive(Debug)]
 pub struct MatchEntry {
-    /// A mask for all fixed bits
+    /// A mask where `1` indicates the bit is fixed, and `0` indicates the bit is variable
     pub mask: Vec<bool>,
 
-    /// Keeps track of all bits that have a fixed value
+    /// Keeps of the expected value for fixed bits
     pub fixed: Vec<bool>,
 
     /// Keeps track of all bits that vary
@@ -158,115 +187,220 @@ impl MatchEntry {
 }
 
 impl MatchEntry {
-    fn parse(input: &mut ParseStream, symbols: &HashMap<String, SymbolValue>) -> Result<Self> {
-        let match_entry = parse_pattern_components(input, symbols)?;
+    fn parse(input: &mut ParseStream, symbols: &SymbolTable) -> Result<Self> {
+        let pattern_group: PatternGroup = input.parse()?;
+        let match_span = pattern_group.span.clone();
 
-        let mut mask = vec![];
-        let mut fixed = vec![];
+        let resolved_group = {
+            let mut resolver = ResolvedPatternGroup::default();
+            resolver.resolve(pattern_group, symbols).map_err(|e| input.error(e))?;
+            resolver
+        };
+
+        let mut mask = vec![false; resolved_group.total_bits];
+        let mut fixed = vec![false; resolved_group.total_bits];
+
+        for entry in resolved_group.fixed {
+            mask[entry.range()].iter_mut().for_each(|bit| *bit = true);
+            fixed[entry.range()].copy_from_slice(&entry.bits);
+        }
+
         let mut variable: Vec<Variable> = vec![];
-
-        // Extract the individual pattern components, and compute the final fixed-bit mask
-        for item in match_entry.components {
-            match item {
-                FixedOrVariable::Fixed(bits) => {
-                    mask.extend(iter::repeat(true).take(bits.len()));
-                    fixed.extend_from_slice(&bits);
+        for var_bits in resolved_group.variable {
+            let var = match variable.iter_mut().find(|e| e.name == var_bits.name) {
+                Some(entry) => entry,
+                None => {
+                    variable.push(Variable { name: var_bits.name, bits: vec![] });
+                    variable.last_mut().unwrap()
                 }
+            };
 
-                FixedOrVariable::Variable((name, len)) => {
-                    let var = match variable.iter_mut().find(|e| e.name == name) {
-                        Some(entry) => entry,
-                        None => {
-                            variable.push(Variable { name, bits: vec![] });
-                            variable.last_mut().unwrap()
-                        }
-                    };
-                    var.bits.push((mask.len(), len));
-
-                    mask.extend(iter::repeat(false).take(len));
-                    fixed.extend(iter::repeat(false).take(len));
-                }
-            }
+            assert!(var_bits.shift.is_none(), "custom shift amount not currently supported");
+            var.bits.push((var_bits.offset, var_bits.length));
         }
 
         let body = input.parse()?;
 
-        Ok(Self { mask, fixed, variable, body, match_span: match_entry.span })
+        Ok(Self { mask, fixed, variable, body, match_span })
     }
 }
 
-struct PatternComponents {
-    components: Vec<FixedOrVariable>,
-    span: proc_macro2::Span,
+struct FixedBits {
+    offset: usize,
+    bits: Vec<bool>,
 }
 
-/// Parses the 'pattern' part of the next match arm
-fn parse_pattern_components(
-    input: &mut ParseStream,
-    symbols: &HashMap<String, SymbolValue>,
-) -> Result<PatternComponents> {
-    let mut span = input.cursor().span();
-    let mut components = vec![];
+impl FixedBits {
+    fn range(&self) -> std::ops::Range<usize> {
+        self.offset..self.offset + self.bits.len()
+    }
+}
 
-    loop {
-        let lookahead = input.lookahead1();
-        if lookahead.peek(Token![=>]) {
-            // We have reached the end of the pattern
-            input.parse::<Token![=>]>()?;
-            break;
-        }
+struct VariableBits {
+    name: String,
+    offset: usize,
+    length: usize,
+    shift: Option<usize>,
+}
 
-        if !(lookahead.peek(Ident) || lookahead.peek(LitInt)) {
-            return Err(lookahead.error());
-        }
+#[derive(Default)]
+struct ResolvedPatternGroup {
+    fixed: Vec<FixedBits>,
+    variable: Vec<VariableBits>,
+    total_bits: usize,
+}
 
-        // Update the input span to cover the sub-component
-        if let Some(joint_span) = span.join(input.cursor().span()) {
-            span = joint_span;
-        }
-
-        components.push(FixedOrVariable::parse(input, symbols)?);
+impl ResolvedPatternGroup {
+    fn add_fixed(&mut self, bits: Vec<bool>) {
+        let num_bits = bits.len();
+        self.fixed.push(FixedBits { offset: self.total_bits, bits });
+        self.total_bits += num_bits;
     }
 
-    Ok(PatternComponents { components, span })
-}
+    fn add_variable(&mut self, name: String, length: usize, shift: Option<usize>) {
+        self.variable.push(VariableBits {
+            name: name.into(),
+            offset: self.total_bits,
+            length,
+            shift,
+        });
+        self.total_bits += length;
+    }
 
-#[derive(Debug)]
-pub enum FixedOrVariable {
-    /// Represents a set bits that are expected to be fixed (e.g. `0010`)
-    Fixed(Vec<bool>),
-
-    /// Represents a set of bits by name and bit count that are expected to vary
-    Variable((String, usize)),
-}
-
-impl FixedOrVariable {
-    fn parse(input: &mut ParseStream, symbols: &HashMap<String, SymbolValue>) -> Result<Self> {
-        if input.peek(Ident) {
-            let prev = input.fork();
-            let name = input.parse::<Ident>()?.to_string();
-
-            // Check whether this identifier exists in the symbol table
-            match symbols.get(&name) {
-                Some(SymbolValue::Const(bits)) => Ok(Self::Fixed(bits.clone())),
-
-                Some(SymbolValue::Var(size)) => Ok(Self::Variable((name, *size))),
-
-                None => {
-                    // Otherwise this is interpreted as a locally defined single letter variable
-                    let size = name.len();
-                    match auto_var_name(&name) {
-                        Ok(name) if symbols.contains_key(&name) => {
-                            Err(prev.error(format!("{} already defined globally", name)))
-                        }
-                        Ok(name) => Ok(Self::Variable((name, size))),
-                        Err(e) => Err(prev.error(e)),
-                    }
+    fn resolve(
+        &mut self,
+        group: PatternGroup,
+        symbols: &SymbolTable,
+    ) -> std::result::Result<(), String> {
+        for component in group.components {
+            match component {
+                PatternComponent::Fixed(bits) => self.add_fixed(bits),
+                PatternComponent::Symbol(name) => self.resolve_symbol(name, symbols)?,
+                PatternComponent::Pattern(name, params) => {
+                    self.expand_pattern(name, params, symbols)?
                 }
             }
         }
+        Ok(())
+    }
+
+    fn resolve_symbol(
+        &mut self,
+        name: String,
+        symbols: &SymbolTable,
+    ) -> std::result::Result<(), String> {
+        Ok(match symbols.values.get(&name) {
+            Some(symbol) => match symbol {
+                SymbolValue::Const(bits) => self.add_fixed(bits.clone()),
+                SymbolValue::Var(length) => self.add_variable(name, *length, None),
+                SymbolValue::Indirect(name) => self.resolve_symbol(name.clone(), symbols)?,
+            },
+
+            None => {
+                // If there is no global symbol defined for this name, then this could be a locally
+                // defined single letter variable, where the length is defined based on the number
+                // of characters in the name
+                let auto_name = auto_var_name(&name)?;
+
+                // Check for shadowing in an existing symbol
+                if symbols.values.contains_key(&auto_name) {
+                    return Err(format!("`{}` already defined", auto_name));
+                }
+
+                let length = name.len();
+                self.add_variable(auto_name, length, None);
+            }
+        })
+    }
+
+    fn expand_pattern(
+        &mut self,
+        name: String,
+        params: Vec<PatternComponent>,
+        symbols: &SymbolTable,
+    ) -> std::result::Result<(), String> {
+        let pattern =
+            symbols.patterns.get(&name).ok_or_else(|| format!("pattern not found: `{}`", name))?;
+
+        let mut pattern_symbols = symbols.clone();
+        for (ident, value) in pattern.args.iter().zip(params.into_iter()) {
+            let value: PatternComponent = value;
+            let symbol = match value {
+                PatternComponent::Fixed(bits) => SymbolValue::Const(bits),
+                PatternComponent::Symbol(name) => SymbolValue::Indirect(name),
+                PatternComponent::Pattern(_, _) => {
+                    return Err("pattern call must not appear inside of ".into())
+                }
+            };
+            pattern_symbols.values.insert(ident.to_string(), symbol);
+        }
+
+        // Now resolve the inner body
+        let inner_body: PatternGroup =
+            syn::parse2(pattern.body.clone()).map_err(|e| e.to_string())?;
+        self.resolve(inner_body, &pattern_symbols)
+    }
+}
+
+struct PatternGroup {
+    components: Vec<PatternComponent>,
+    span: proc_macro2::Span,
+}
+
+impl Parse for PatternGroup {
+    /// Parses the 'pattern' part of the next match arm
+    fn parse(input: ParseStream) -> Result<Self> {
+        let mut span = input.cursor().span();
+        let mut components = vec![];
+
+        while !input.is_empty() {
+            let lookahead = input.lookahead1();
+            if lookahead.peek(Token![=>]) {
+                // We have reached the end of the pattern
+                input.parse::<Token![=>]>()?;
+                break;
+            }
+
+            if !(lookahead.peek(Ident) || lookahead.peek(LitInt)) {
+                return Err(lookahead.error());
+            }
+
+            // Update the input span to cover the sub-component
+            if let Some(joint_span) = span.join(input.cursor().span()) {
+                span = joint_span;
+            }
+
+            components.push(PatternComponent::parse(input)?);
+        }
+
+        Ok(Self { components, span })
+    }
+}
+
+#[derive(Debug)]
+pub enum PatternComponent {
+    Fixed(Vec<bool>),
+    Symbol(String),
+    Pattern(String, Vec<PatternComponent>),
+}
+
+impl Parse for PatternComponent {
+    fn parse(mut input: ParseStream) -> Result<Self> {
+        if input.peek(Ident) {
+            let name = input.parse::<Ident>()?.to_string();
+            if !input.peek(syn::token::Paren) {
+                return Ok(Self::Symbol(name.to_string()));
+            }
+
+            let content;
+            syn::parenthesized!(content in input);
+            let params: Punctuated<PatternComponent, Token![,]> =
+                content.parse_terminated(PatternComponent::parse)?;
+
+            Ok(Self::Pattern(name, params.into_iter().collect()))
+        }
         else if input.peek(LitInt) {
-            Ok(Self::Fixed(parse_fixed_bits(input, false)?))
+            Ok(Self::Fixed(parse_fixed_bits(&mut input, false)?))
         }
         else {
             Err(input.error(

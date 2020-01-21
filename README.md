@@ -17,31 +17,49 @@ fn disasm(bytes: &[u8], offset: &mut usize) -> String {
         // Specify to the bit-match macro that 8 bits can be read by calling the `read_u8` function
         read 8 => read_u8();
 
-        // Fixed bits are specified with '0's and '1's, variable bits are specified as characters,
-        // and are concatenated together
-        0000 ss dd => format!("add r{}, r{}", d, s),
-        0001 ss dd => format!("sub r{}, r{}", d, s),
-        0010 ss dd => format!("or  r{}, r{}",  d, s),
-        0011 ss dd => format!("xor r{}, r{}", d, s),
-        0100 ss dd => format!("and r{}, r{}", d, s),
-        0101 nn dd => format!("rsh r{}, {}", d, n + 1),
-        0110 nn dd => format!("lsh r{}, {}", d, n + 1),
-        0111 nn dd => format!("invalid"),
+        // Define variables to store variable bits of a fixed length
+        var src: 2;
+        var dst: 2;
+        var imm8: 8;
+        var imm16: 16;
+        var shift: 2;
+
+        // Define a pattern for a group of instructions
+        pattern op(opcode) => (opcode src dst);
+        op(0000) => format!("add r{}, r{}", dst, src),
+        op(0001) => format!("sub r{}, r{}", dst, src),
+        op(0010) => format!("or r{}, r{}",  dst, src),
+        op(0011) => format!("xor r{}, r{}", dst, src),
+        op(0100) => format!("and r{}, r{}", dst, src),
+
+        pattern shift(opcode) => (opcode shift dst);
+        shift(0101) => format!("rsh r{}, {}", dst, shift + 1),
+        shift(0110) => format!("lsh r{}, {}", dst, shift + 1),
+        shift(0111) => format!("invalid"),
 
         // Bits are read on demand allowing for variable length decoding
-        1000 ss dd iiiiiiii => format!("load {}, [r{} + {}]", d, s, i),
-        1001 ss dd iiiiiiii => format!("store {}, [r{} + {}]", d, s, i as u32),
+        pattern mem(opcode) => (opcode src dst imm8);
+        mem(1000) => format!("load {}, [r{} + {}]", dst, src, imm8),
+        mem(1001) => format!("store {}, [r{} + {}]", dst, src, imm8 as u32),
 
-        1010 cc cc => format!("jz {}", c),
-        1011 xx xx => format!("invalid"),
-        1100 xx xx => format!("invalid"),
-        1101 xx xx => format!("invalid"),
-        1110 xx xx => format!("invalid"),
+        // For simple or unique instructions it is not necessary to define variables, or patterns
+        // an inline variable is automatically created for each group of variable bits with the same
+        // character, with length defined based on the number of times the character is repeated
+        1010 aaaa => format!("jz {}", a),
+        1011 xxxx => format!("invalid"),
+        1100 xxxx => format!("invalid"),
+        1101 xxxx => format!("invalid"),
+        1110 xxxx => format!("invalid"),
 
-        1111 00 dd iiiiiiii          => format!("lu r{}, #{}", d, i),
-        1111 01 dd iiiiiiii          => format!("li r{}, #{}", d, i),
-        1111 10 dd iiiiiiii iiiiiiii => format!("lu r{}, #{}", d, i),
-        1111 11 dd iiiiiiii iiiiiiii => format!("li r{}, #{}", d, i),
+        // Fixed bits can be named constants
+        const LOAD_IMM = 1111;
+
+        // Global symbols are allowed in pattern substitution
+        pattern loadi(opcode, imm) => (LOAD_IMM opcode dst imm);
+        loadi(00, imm8) => format!("li r{}, #{}", dst, imm8),
+        loadi(01, imm8) => format!("li r{}, #{}", dst, imm8),
+        loadi(10, imm16) => format!("li r{}, #{}", dst, imm16),
+        loadi(11, imm16) => format!("li r{}, #{}", dst, imm16),
     }
 }
 ```
