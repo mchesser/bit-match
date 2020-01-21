@@ -193,7 +193,7 @@ fn bits_lit_type(num_bits: usize) -> Type {
 }
 
 /// Converts a bit vector (encoded as an array of bools) to a string of '0's and '1's
-fn bits_to_string(bits: &[bool]) -> String {
+pub(crate) fn bits_to_string(bits: &[bool]) -> String {
     let cond = |&x| if x { '1' } else { '0' };
     bits.iter().map(cond).collect()
 }

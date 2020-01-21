@@ -83,7 +83,7 @@ impl<'a> MatchTree<'a> {
         if sub_matches.len() == 1 {
             // We failed to make progress -- meaning there are no unique fixed bits within this
             // sub-branch
-            return Err(errors::overlapping_variable(input));
+            return Err(errors::overlapping_variable(&groups));
         }
 
         // Recursively create subtrees for each branch

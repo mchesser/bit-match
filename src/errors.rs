@@ -5,11 +5,13 @@ use syn::Error;
 
 use crate::MatchEntry;
 
-pub(crate) fn overlapping_variable(items: &[&MatchEntry]) -> Error {
-    // Generate an error message with the appropriate spans
-    let mut error = Error::new(Span::call_site(), "No unique fixed bits within group");
-    for entry in items {
-        error.combine(Error::new(entry.match_span, "Note: in group"));
+pub(crate) fn overlapping_variable(groups: &BTreeMap<&[bool], Vec<&MatchEntry>>) -> Error {
+    let mut error = Error::new(Span::call_site(), format!("No unique fixed bits within group"));
+    for (key, entries) in groups {
+        let msg = format!("Note: mask = {} ({})", crate::gen::bits_to_string(key), key.len());
+        for entry in entries {
+            error.combine(Error::new(entry.match_span, msg.clone()));
+        }
     }
     error
 }
