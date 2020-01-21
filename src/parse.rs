@@ -41,7 +41,7 @@ impl Parse for BitMatchInput {
             }
             else if lookahead.peek(Token![_]) {
                 if let Some(_entry) = fall_through {
-                    // TODO: include the span of entry in the error message
+                    // TODO: include the span of `entry` in the error message
                     return Err(input.error("Only one fallthrough case may be specified"));
                 }
 
@@ -104,7 +104,11 @@ impl SymbolTable {
         input.parse::<Token![const]>()?;
         let name = input.parse::<Ident>()?.to_string();
         input.parse::<Token![=]>()?;
-        let pattern = parse_fixed_bits(input, true)?;
+
+        let mut pattern = vec![];
+        while !input.peek(Token![;]) {
+            pattern.extend(parse_fixed_bits(input, true)?);
+        }
         input.parse::<Token![;]>()?;
 
         self.values.insert(name, SymbolValue::Const(pattern));
@@ -366,14 +370,15 @@ impl ResolvedPatternGroup {
     fn expand_pattern(
         &mut self,
         name: String,
-        params: Vec<Component>,
+        params: Vec<PatternGroup>,
         symbols: &SymbolTable,
     ) -> std::result::Result<(), String> {
         let pattern =
             symbols.patterns.get(&name).ok_or_else(|| format!("pattern not found: `{}`", name))?;
 
         let mut pattern_symbols = symbols.clone();
-        for (ident, value) in pattern.args.iter().zip(params.into_iter()) {
+        for (ident, value) in pattern.args.iter().zip(params.into_iter().flat_map(|x| x.components))
+        {
             let value: Component = value;
             let symbol = match value {
                 Component::Fixed(bits) => SymbolValue::Const(bits),
@@ -392,6 +397,7 @@ impl ResolvedPatternGroup {
     }
 }
 
+#[derive(Debug)]
 struct PatternGroup {
     components: Vec<Component>,
     span: proc_macro2::Span,
@@ -405,13 +411,12 @@ impl Parse for PatternGroup {
 
         while !input.is_empty() {
             let lookahead = input.lookahead1();
-            if lookahead.peek(Token![=>]) {
-                // We have reached the end of the pattern
-                break;
-            }
 
             if !(lookahead.peek(Ident) || lookahead.peek(LitInt)) {
-                return Err(lookahead.error());
+                if components.is_empty() {
+                    return Err(lookahead.error());
+                }
+                break;
             }
 
             // Update the input span to cover the sub-component
@@ -430,7 +435,7 @@ impl Parse for PatternGroup {
 enum Component {
     Fixed(Vec<bool>),
     Symbol(String, Option<Metadata>),
-    Pattern(String, Vec<Component>),
+    Pattern(String, Vec<PatternGroup>),
 }
 
 impl Parse for Component {
@@ -447,8 +452,8 @@ impl Parse for Component {
 
             let content;
             syn::parenthesized!(content in input);
-            let params: Punctuated<Component, Token![,]> =
-                content.parse_terminated(Component::parse)?;
+            let params: Punctuated<PatternGroup, Token![,]> =
+                content.parse_terminated(PatternGroup::parse)?;
 
             Ok(Self::Pattern(name, params.into_iter().collect()))
         }
