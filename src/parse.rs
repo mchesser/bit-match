@@ -529,6 +529,7 @@ fn parse_fixed_bits(input: &mut ParseStream, global: bool) -> Result<Vec<bool>> 
                     Note: spaces are required between fixed and variable bits",
                 ));
             }
+            '_' => (),
             _ => return Err(input.error("Fixed bits must be either `0` or `1`")),
         }
     }
