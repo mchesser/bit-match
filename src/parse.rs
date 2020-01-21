@@ -14,12 +14,14 @@ mod kw {
 pub struct BitMatchInput {
     pub readers: Vec<BitReader>,
     pub matches: Vec<MatchEntry>,
+    pub fall_through: Option<Expr>,
 }
 
 impl Parse for BitMatchInput {
     fn parse(mut input: ParseStream) -> Result<Self> {
         let mut readers = vec![];
         let mut matches = vec![];
+        let mut fall_through = None;
 
         let mut symbol_table = SymbolTable::default();
 
@@ -37,15 +39,21 @@ impl Parse for BitMatchInput {
             else if lookahead.peek(kw::pattern) {
                 symbol_table.parse_pattern_def(&mut input)?;
             }
+            else if lookahead.peek(Token![_]) {
+                if let Some(_entry) = fall_through {
+                    // TODO: include the span of entry in the error message
+                    return Err(input.error("Only one fallthrough case may be specified"));
+                }
+
+                input.parse::<Token![_]>()?;
+                input.parse::<Token![=>]>()?;
+
+                fall_through = Some(input.parse()?);
+                parse_optional_comma(&mut input);
+            }
             else {
                 matches.push(MatchEntry::parse(&mut input, &symbol_table)?);
-
-                // Parse optional `,` token after each entry
-
-                let lookahead = input.lookahead1();
-                if lookahead.peek(Token![,]) {
-                    input.parse::<Token![,]>()?;
-                }
+                parse_optional_comma(&mut input);
             }
         }
 
@@ -55,7 +63,13 @@ impl Parse for BitMatchInput {
             return Err(input.error("Expected at least 1 reader expression"));
         }
 
-        Ok(Self { readers, matches })
+        Ok(Self { readers, matches, fall_through })
+    }
+}
+
+fn parse_optional_comma(input: &mut ParseStream) {
+    if input.peek(Token![,]) {
+        input.parse::<Token![,]>().unwrap();
     }
 }
 
@@ -85,7 +99,7 @@ struct SymbolTable {
 }
 
 impl SymbolTable {
-    /// Parse statement of the form: `const <ident> = <bit string>;
+    /// Parse a statement of the form: `const <ident> = <bit string>;
     fn parse_const(&mut self, input: &mut ParseStream) -> Result<()> {
         input.parse::<Token![const]>()?;
         let name = input.parse::<Ident>()?.to_string();
@@ -97,7 +111,7 @@ impl SymbolTable {
         Ok(())
     }
 
-    /// Parse statement of the form: `var <ident> = <num-bits>;
+    /// Parse a statement of the form: `var <ident> = <num-bits>;
     fn parse_var(&mut self, input: &mut ParseStream) -> Result<()> {
         input.parse::<kw::var>()?;
         let name = input.parse::<Ident>()?.to_string();
@@ -105,10 +119,11 @@ impl SymbolTable {
         let num_bits = input.parse::<LitInt>()?.base10_parse()?;
         input.parse::<Token![;]>()?;
 
-        self.values.insert(name, SymbolValue::Var(num_bits));
+        self.values.insert(name, SymbolValue::Var(Metadata::new(num_bits)));
         Ok(())
     }
 
+    /// Parse a statement of the form: `pattern <ident>(<args..>) => (<token stream>)`
     fn parse_pattern_def(&mut self, input: &mut ParseStream) -> Result<()> {
         input.parse::<kw::pattern>()?;
         let name = input.parse::<Ident>()?.to_string();
@@ -117,16 +132,18 @@ impl SymbolTable {
         let content;
         syn::parenthesized!(content in input);
         let args: Punctuated<Ident, Token![,]> = content.parse_terminated(Ident::parse)?;
+        let args = args.into_iter().collect();
 
         input.parse::<Token![=>]>()?;
 
         // Parse pattern body
         let content;
         syn::parenthesized!(content in input);
-        let pattern = PatternDef { args: args.into_iter().collect(), body: content.parse()? };
+        let body = content.parse()?;
+
         input.parse::<Token![;]>()?;
 
-        self.patterns.insert(name, pattern);
+        self.patterns.insert(name, PatternDef { args, body });
         Ok(())
     }
 }
@@ -134,8 +151,8 @@ impl SymbolTable {
 #[derive(Debug, Clone)]
 enum SymbolValue {
     Const(Vec<bool>),
-    Var(usize),
-    Indirect(String),
+    Var(Metadata),
+    Indirect(String, Option<Metadata>),
 }
 
 #[derive(Debug, Clone)]
@@ -147,8 +164,33 @@ struct PatternDef {
 /// A pattern component representing variable bits
 #[derive(Debug)]
 pub struct Variable {
+    /// The name of the identifier that will be assigned to this variable
     pub name: String,
-    pub bits: Vec<(usize, usize)>,
+
+    /// The collection of bit-slices that are used to construct the variable
+    pub bits: Vec<BitSlice>,
+}
+
+impl Variable {
+    /// Computes the total number of bits required to store this variable
+    ///
+    /// Used for computing the output type of the variable
+    pub fn total_bits(&self) -> usize {
+        self.bits.iter().map(|bits| bits.length + bits.shift).max().unwrap_or(0)
+    }
+}
+
+/// Represents a contiguous slice of bits within a bit stream
+#[derive(Debug, Copy, Clone)]
+pub struct BitSlice {
+    /// The offset of slice within the input bit stream
+    pub offset: usize,
+
+    /// The number of bits that should
+    pub length: usize,
+
+    /// The amount this value should be shifted
+    pub shift: usize,
 }
 
 /// Represents a fully parsed match arm
@@ -200,25 +242,29 @@ impl MatchEntry {
         let mut mask = vec![false; resolved_group.total_bits];
         let mut fixed = vec![false; resolved_group.total_bits];
 
+        // For each fixed bit slice in this group update the mask and fixed bit values
         for entry in resolved_group.fixed {
             mask[entry.range()].iter_mut().for_each(|bit| *bit = true);
             fixed[entry.range()].copy_from_slice(&entry.bits);
         }
 
+        // Iterate through each set of variable bits, grouping them by name. This is done in reverse
+        // order to allow the shift amount to be computed correctly for auto variables.
         let mut variable: Vec<Variable> = vec![];
-        for var_bits in resolved_group.variable {
-            let var = match variable.iter_mut().find(|e| e.name == var_bits.name) {
+        for var_slice in resolved_group.variable.into_iter().rev() {
+            let var = match variable.iter_mut().find(|e| e.name == var_slice.name) {
                 Some(entry) => entry,
                 None => {
-                    variable.push(Variable { name: var_bits.name, bits: vec![] });
+                    variable.push(Variable { name: var_slice.name, bits: vec![] });
                     variable.last_mut().unwrap()
                 }
             };
 
-            assert!(var_bits.shift.is_none(), "custom shift amount not currently supported");
-            var.bits.push((var_bits.offset, var_bits.length));
+            let shift = var_slice.shift.unwrap_or(var.total_bits());
+            var.bits.push(BitSlice { offset: var_slice.offset, length: var_slice.length, shift });
         }
 
+        input.parse::<Token![=>]>()?;
         let body = input.parse()?;
 
         Ok(Self { mask, fixed, variable, body, match_span })
@@ -257,14 +303,14 @@ impl ResolvedPatternGroup {
         self.total_bits += num_bits;
     }
 
-    fn add_variable(&mut self, name: String, length: usize, shift: Option<usize>) {
+    fn add_variable(&mut self, name: String, meta: Metadata) {
         self.variable.push(VariableBits {
             name: name.into(),
             offset: self.total_bits,
-            length,
-            shift,
+            length: meta.length,
+            shift: meta.shift,
         });
-        self.total_bits += length;
+        self.total_bits += meta.length;
     }
 
     fn resolve(
@@ -274,11 +320,9 @@ impl ResolvedPatternGroup {
     ) -> std::result::Result<(), String> {
         for component in group.components {
             match component {
-                PatternComponent::Fixed(bits) => self.add_fixed(bits),
-                PatternComponent::Symbol(name) => self.resolve_symbol(name, symbols)?,
-                PatternComponent::Pattern(name, params) => {
-                    self.expand_pattern(name, params, symbols)?
-                }
+                Component::Fixed(bits) => self.add_fixed(bits),
+                Component::Symbol(name, meta) => self.resolve_symbol(name, meta, symbols)?,
+                Component::Pattern(name, params) => self.expand_pattern(name, params, symbols)?,
             }
         }
         Ok(())
@@ -287,13 +331,20 @@ impl ResolvedPatternGroup {
     fn resolve_symbol(
         &mut self,
         name: String,
+        meta: Option<Metadata>,
         symbols: &SymbolTable,
     ) -> std::result::Result<(), String> {
         Ok(match symbols.values.get(&name) {
             Some(symbol) => match symbol {
                 SymbolValue::Const(bits) => self.add_fixed(bits.clone()),
-                SymbolValue::Var(length) => self.add_variable(name, *length, None),
-                SymbolValue::Indirect(name) => self.resolve_symbol(name.clone(), symbols)?,
+                SymbolValue::Var(base) => self.add_variable(name, base.merge(meta)?),
+                SymbolValue::Indirect(name, base) => {
+                    let meta = match base {
+                        Some(base) => Some(base.merge(meta)?),
+                        None => meta,
+                    };
+                    self.resolve_symbol(name.clone(), meta, symbols)?;
+                }
             },
 
             None => {
@@ -307,8 +358,7 @@ impl ResolvedPatternGroup {
                     return Err(format!("`{}` already defined", auto_name));
                 }
 
-                let length = name.len();
-                self.add_variable(auto_name, length, None);
+                self.add_variable(auto_name, Metadata::new(name.len()));
             }
         })
     }
@@ -316,7 +366,7 @@ impl ResolvedPatternGroup {
     fn expand_pattern(
         &mut self,
         name: String,
-        params: Vec<PatternComponent>,
+        params: Vec<Component>,
         symbols: &SymbolTable,
     ) -> std::result::Result<(), String> {
         let pattern =
@@ -324,11 +374,11 @@ impl ResolvedPatternGroup {
 
         let mut pattern_symbols = symbols.clone();
         for (ident, value) in pattern.args.iter().zip(params.into_iter()) {
-            let value: PatternComponent = value;
+            let value: Component = value;
             let symbol = match value {
-                PatternComponent::Fixed(bits) => SymbolValue::Const(bits),
-                PatternComponent::Symbol(name) => SymbolValue::Indirect(name),
-                PatternComponent::Pattern(_, _) => {
+                Component::Fixed(bits) => SymbolValue::Const(bits),
+                Component::Symbol(name, meta) => SymbolValue::Indirect(name, meta),
+                Component::Pattern(_, _) => {
                     return Err("pattern call must not appear inside of ".into())
                 }
             };
@@ -343,7 +393,7 @@ impl ResolvedPatternGroup {
 }
 
 struct PatternGroup {
-    components: Vec<PatternComponent>,
+    components: Vec<Component>,
     span: proc_macro2::Span,
 }
 
@@ -357,7 +407,6 @@ impl Parse for PatternGroup {
             let lookahead = input.lookahead1();
             if lookahead.peek(Token![=>]) {
                 // We have reached the end of the pattern
-                input.parse::<Token![=>]>()?;
                 break;
             }
 
@@ -370,7 +419,7 @@ impl Parse for PatternGroup {
                 span = joint_span;
             }
 
-            components.push(PatternComponent::parse(input)?);
+            components.push(Component::parse(input)?);
         }
 
         Ok(Self { components, span })
@@ -378,24 +427,28 @@ impl Parse for PatternGroup {
 }
 
 #[derive(Debug)]
-pub enum PatternComponent {
+enum Component {
     Fixed(Vec<bool>),
-    Symbol(String),
-    Pattern(String, Vec<PatternComponent>),
+    Symbol(String, Option<Metadata>),
+    Pattern(String, Vec<Component>),
 }
 
-impl Parse for PatternComponent {
+impl Parse for Component {
     fn parse(mut input: ParseStream) -> Result<Self> {
         if input.peek(Ident) {
             let name = input.parse::<Ident>()?.to_string();
             if !input.peek(syn::token::Paren) {
-                return Ok(Self::Symbol(name.to_string()));
+                let metadata = match input.peek(syn::token::Bracket) {
+                    true => Some(input.parse()?),
+                    false => None,
+                };
+                return Ok(Self::Symbol(name.to_string(), metadata));
             }
 
             let content;
             syn::parenthesized!(content in input);
-            let params: Punctuated<PatternComponent, Token![,]> =
-                content.parse_terminated(PatternComponent::parse)?;
+            let params: Punctuated<Component, Token![,]> =
+                content.parse_terminated(Component::parse)?;
 
             Ok(Self::Pattern(name, params.into_iter().collect()))
         }
@@ -408,6 +461,55 @@ impl Parse for PatternComponent {
                 bits (e.g. `aaaa`) declaration",
             ))
         }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct Metadata {
+    length: usize,
+    shift: Option<usize>,
+}
+
+impl Metadata {
+    fn new(length: usize) -> Metadata {
+        Metadata { length, shift: None }
+    }
+
+    fn merge(self, other: Option<Metadata>) -> std::result::Result<Metadata, String> {
+        let other = match other {
+            Some(other) => other,
+            None => return Ok(self),
+        };
+
+        let self_shift = self.shift.unwrap_or(0);
+        let other_shift = other.shift.unwrap_or(0);
+
+        if self_shift + self.length < self_shift + other_shift + other.length {
+            return Err("Variable index out of bounds".into());
+        }
+        Ok(Metadata { shift: Some(self_shift + other_shift), length: other.length })
+    }
+}
+
+impl Parse for Metadata {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let content;
+        let _ = syn::bracketed!(content in input);
+
+        let high = content.parse::<LitInt>()?.base10_parse()?;
+        let low = match content.peek(Token![:]) {
+            true => {
+                content.parse::<Token![:]>()?;
+                content.parse::<LitInt>()?.base10_parse()?
+            }
+            false => high,
+        };
+
+        if low > high {
+            return Err(input.error("High bit must be greater than low bit"));
+        }
+
+        Ok(Metadata { shift: Some(low), length: high - low + 1 })
     }
 }
 

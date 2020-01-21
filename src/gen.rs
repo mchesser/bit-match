@@ -156,23 +156,17 @@ fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
     let mut variable_stmts: Vec<Stmt> = vec![];
     for var in &entry.variable {
         let ident = Ident::new(&format!("{}", var.name), Span::call_site());
-
-        // Determine the smallest possible type by computing the total number of possible
-        // bits for this identifier.
-        let ty = bits_lit_type(var.bits.iter().map(|(_, len)| len).sum());
+        let ty = bits_lit_type(var.total_bits());
 
         // Each variable might consist of multiple sets of not contiguous bits, so here
         // extract each of the variable components, cast them to the correct size and shift
         // them to the appropriate position.
-        //
         // (this is common when encoding instructions that contain immediate values).
         let mut values: Vec<Expr> = vec![];
-        let mut output_offset = 0;
-        for (offset, len) in var.bits.iter().rev().copied() {
-            let (reads, value) = state.read_and_get(&get_mask(offset, len));
+        for slice in &var.bits {
+            let (reads, value) = state.read_and_get(&get_mask(slice.offset, slice.length));
             read_stmts.extend_from_slice(&reads);
-            values.push(shift(parse_quote!(#value), &ty, output_offset as isize));
-            output_offset += len;
+            values.push(shift(parse_quote!(#value), &ty, slice.shift as isize));
         }
 
         variable_stmts.push(parse_quote!(let #ident = #(#values)|*;))
