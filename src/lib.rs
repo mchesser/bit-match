@@ -20,7 +20,7 @@ pub fn match_bits(tokens: self::proc_macro::TokenStream) -> self::proc_macro::To
         Err(e) => return e.to_compile_error().into(),
     };
 
-    DecoderState::new(&input.readers).build_token_stream(&match_tree).into()
+    DecoderState::new(&input).build_token_stream(&match_tree).into()
 }
 
 type MatchBranchArm<'a> = (Vec<bool>, MatchTree<'a>);

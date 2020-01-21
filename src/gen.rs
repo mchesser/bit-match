@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_quote, Expr, Ident, LitInt, Stmt, Type};
 
-use crate::{BitReader, MatchBranchArm, MatchEntry, MatchTree};
+use crate::{BitMatchInput, BitReader, MatchBranchArm, MatchEntry, MatchTree};
 
 #[derive(Clone)]
 pub(crate) struct DecoderState<'a> {
@@ -14,11 +14,18 @@ pub(crate) struct DecoderState<'a> {
 
     /// Stores expressions that can be used to retrieve bytes from some source.
     read_exprs: &'a [BitReader],
+
+    /// The default case used if not all cases are covered in a sub-branch
+    default_case: &'a Option<Expr>,
 }
 
 impl<'a> DecoderState<'a> {
-    pub fn new(read_exprs: &'a [BitReader]) -> Self {
-        Self { subtree_values: vec![], read_exprs }
+    pub fn new(input: &'a BitMatchInput) -> Self {
+        Self {
+            subtree_values: vec![],
+            read_exprs: &input.readers,
+            default_case: &input.fall_through,
+        }
     }
 
     pub fn build_token_stream(&self, tree: &MatchTree) -> TokenStream {
@@ -121,12 +128,17 @@ fn decode_branch(mut state: DecoderState, mask: &[bool], arms: &[MatchBranchArm]
 
     let expected_arms = 1 << crate::count_ones(mask);
     let catch_all = match arms.len().cmp(&expected_arms) {
-        Ordering::Less => {
-            // TODO: consider allowing the user configure what is emitted here, and improve the
-            // error message
-            let error = format!("Not all cases covered for mask: {}", bits_to_string(mask));
-            quote!(compile_error!(#error))
-        }
+        Ordering::Less => match state.default_case {
+            Some(default) => quote!(#default),
+            None => {
+                let error = format!(
+                    "Not all cases covered for mask: {} ({})",
+                    bits_to_string(mask),
+                    mask.len()
+                );
+                quote!(compile_error!(#error))
+            }
+        },
 
         // All cases are covered, however the compiler doesn't know this, so generate an
         // unreachable expression (this should be optimized away)
