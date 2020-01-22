@@ -68,23 +68,25 @@ fn decode(bytes: &[u8], offset: &mut usize) -> Instruction {
         pattern shift(opcode) => (opcode shift dst);
         shift(0101) => Instruction::OpImm(Op::Rsh, reg(dst), shift as u32 + 1),
         shift(0110) => Instruction::OpImm(Op::Lsh, reg(dst), shift as u32 + 1),
-        shift(0111) => Instruction::Invalid,
 
         pattern mem(opcode) => (opcode src dst imm8);
         mem(1000) => Instruction::Load(reg(dst), reg(src), imm8 as u32),
         mem(1001) => Instruction::Store(reg(dst), reg(src), imm8 as u32),
 
         1010 cond => Instruction::Branch(cond),
-        1011 xxxx => Instruction::Invalid,
-        1100 xxxx => Instruction::Invalid,
-        1101 xxxx => Instruction::Invalid,
-        1110 xxxx => Instruction::Invalid,
 
         pattern loadi(opcode, imm) => (1111 opcode dst imm);
         loadi(00, imm8)  => Instruction::OpImm(Op::Mov, reg(dst), sxt_8(imm8)),
         loadi(01, imm8)  => Instruction::OpImm(Op::Mov, reg(dst), zxt_8(imm8)),
         loadi(10, imm16) => Instruction::OpImm(Op::Mov, reg(dst), sxt_16(imm16)),
         loadi(11, imm16) => Instruction::OpImm(Op::Mov, reg(dst), zxt_16(imm16)),
+
+
+        pattern invalid(opcode) => (opcode);
+        invalid(____ __ 00) => Instruction::Invalid,
+        invalid(____ __ 01) => Instruction::Invalid,
+        invalid(____ __ 10) => Instruction::Invalid,
+        invalid(____ __ 11) => Instruction::Invalid,
     }
 }
 

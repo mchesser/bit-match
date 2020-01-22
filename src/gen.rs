@@ -4,7 +4,10 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{parse_quote, Expr, Ident, LitInt, Stmt, Type};
 
-use crate::{BitMatchInput, BitReader, MatchBranchArm, MatchEntry, MatchTree};
+use crate::{
+    helpers::{bits_to_string, first_bit, get_mask},
+    BitMatchInput, BitReader, MatchBranchArm, MatchEntry, MatchTree,
+};
 
 #[derive(Clone)]
 pub(crate) struct DecoderState<'a> {
@@ -14,23 +17,18 @@ pub(crate) struct DecoderState<'a> {
 
     /// Stores expressions that can be used to retrieve bytes from some source.
     read_exprs: &'a [BitReader],
-
-    /// The default case used if not all cases are covered in a sub-branch
-    default_case: &'a Option<Expr>,
 }
 
 impl<'a> DecoderState<'a> {
     pub fn new(input: &'a BitMatchInput) -> Self {
-        Self {
-            subtree_values: vec![],
-            read_exprs: &input.readers,
-            default_case: &input.fall_through,
-        }
+        Self { subtree_values: vec![], read_exprs: &input.readers }
     }
 
     pub fn build_token_stream(&self, tree: &MatchTree) -> TokenStream {
         match tree {
-            MatchTree::Branch { mask, arms } => decode_branch(self.clone(), mask, &arms),
+            MatchTree::Branch { mask, arms, any_sub_tree } => {
+                decode_branch(self.clone(), mask, &arms, any_sub_tree)
+            }
             MatchTree::Leaf(entry) => decode_leaf(self.clone(), entry),
         }
     }
@@ -113,23 +111,30 @@ impl<'a> DecoderState<'a> {
     }
 }
 
-fn decode_branch(mut state: DecoderState, mask: &[bool], arms: &[MatchBranchArm]) -> TokenStream {
+fn decode_branch(
+    mut state: DecoderState,
+    mask: &[bool],
+    arms: &[MatchBranchArm],
+    any_sub_tree: &Option<Box<MatchTree>>,
+) -> TokenStream {
     let (read_stmts, match_expr) = state.read_and_get(mask);
 
     // For each branch, decode the inner subtree and generate a match arm
     let arm_tokens: Vec<_> = arms
         .iter()
-        .map(|(arm_bits, inner)| {
-            let arm_lit = bits_to_literal(&arm_bits[first_bit(mask)..]);
-            let inner_tokens = state.build_token_stream(inner);
+        .map(|arm| {
+            let arm_lit = bits_to_literal(&arm.key[first_bit(mask)..]);
+            let inner_tokens = state.build_token_stream(&arm.sub_tree);
             quote!(#arm_lit => { #inner_tokens })
         })
         .collect();
 
     let expected_arms = 1 << crate::count_ones(mask);
     let catch_all = match arms.len().cmp(&expected_arms) {
-        Ordering::Less => match state.default_case {
-            Some(default) => quote!(#default),
+        Ordering::Less => match any_sub_tree {
+            // The default case is covered by a default arm provided by the user
+            Some(any_sub_tree) => state.build_token_stream(&*any_sub_tree),
+
             None => {
                 let error = format!(
                     "Not all cases covered for mask: {} ({})",
@@ -153,7 +158,7 @@ fn decode_branch(mut state: DecoderState, mask: &[bool], arms: &[MatchBranchArm]
 
         match #match_expr {
             #(#arm_tokens,)*
-            _ => #catch_all
+            _ => { #catch_all }
         }
     }
 }
@@ -184,8 +189,11 @@ fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
         variable_stmts.push(parse_quote!(let #ident = #(#values)|*;))
     }
 
+    let debug_string = entry.debug_string();
+
     let body = &entry.body;
     quote! {
+        #[doc(#debug_string)]
         #(#read_stmts)*
         #(#variable_stmts)*
         #body
@@ -202,12 +210,6 @@ fn bits_lit_type(num_bits: usize) -> Type {
         64..=128 => parse_quote!(u128),
         _ => panic!("Maximum match size is 128-bits"),
     }
-}
-
-/// Converts a bit vector (encoded as an array of bools) to a string of '0's and '1's
-pub(crate) fn bits_to_string(bits: &[bool]) -> String {
-    let cond = |&x| if x { '1' } else { '0' };
-    bits.iter().map(cond).collect()
 }
 
 /// Converts a collection of bits to the smallest possible fixed sized integer literal
@@ -228,14 +230,4 @@ fn shift(expr: Expr, out_type: &Type, amount: isize) -> Expr {
     else {
         parse_quote!(#expr as #out_type)
     }
-}
-
-/// Finds the offset of the first true bit
-fn first_bit(bits: &[bool]) -> usize {
-    bits.iter().position(|&p| p).expect("Expected at least one true bit")
-}
-
-/// Generates a bit mask for a given offset and length
-fn get_mask(offset: usize, len: usize) -> Vec<bool> {
-    std::iter::repeat(false).take(offset).chain(std::iter::repeat(true).take(len)).collect()
 }
