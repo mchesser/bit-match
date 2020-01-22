@@ -17,19 +17,22 @@ pub(crate) struct DecoderState<'a> {
 
     /// Stores expressions that can be used to retrieve bytes from some source.
     read_exprs: &'a [BitReader],
+
+    mask: Vec<bool>,
+    values: Vec<bool>,
 }
 
 impl<'a> DecoderState<'a> {
     pub fn new(input: &'a BitMatchInput) -> Self {
-        Self { subtree_values: vec![], read_exprs: &input.readers }
+        Self { subtree_values: vec![], read_exprs: &input.readers, mask: vec![], values: vec![] }
     }
 
-    pub fn build_token_stream(&self, tree: &MatchTree) -> TokenStream {
+    pub fn build_token_stream(self, tree: &MatchTree) -> TokenStream {
         match tree {
             MatchTree::Branch { mask, arms, any_sub_tree } => {
-                decode_branch(self.clone(), mask, &arms, any_sub_tree)
+                decode_branch(self, mask, &arms, any_sub_tree)
             }
-            MatchTree::Leaf(entry) => decode_leaf(self.clone(), entry),
+            MatchTree::Leaf(entry) => decode_leaf(self, entry),
         }
     }
 
@@ -109,6 +112,22 @@ impl<'a> DecoderState<'a> {
         self.subtree_values.push((*len, next_ident.clone()));
         Some(parse_quote!(let #next_ident = #read_expr;))
     }
+
+    pub fn debug_string(&self) -> String {
+        let mut output = String::new();
+        for (&mask_bit, &value) in self.mask.iter().zip(self.values.iter()) {
+            if !mask_bit {
+                output.push('_');
+            }
+            else if value {
+                output.push('1');
+            }
+            else {
+                output.push('0');
+            }
+        }
+        output
+    }
 }
 
 fn decode_branch(
@@ -123,8 +142,18 @@ fn decode_branch(
     let arm_tokens: Vec<_> = arms
         .iter()
         .map(|arm| {
+            let mut new_state = state.clone();
+            new_state.mask.resize(state.mask.len().max(mask.len()), false);
+            new_state.values.resize(state.mask.len().max(mask.len()), false);
+            for i in 0..mask.len() {
+                if mask[i] {
+                    new_state.mask[i] = true;
+                    new_state.values[i] = arm.key[i];
+                }
+            }
+
             let arm_lit = bits_to_literal(&arm.key[first_bit(mask)..]);
-            let inner_tokens = state.build_token_stream(&arm.sub_tree);
+            let inner_tokens = new_state.build_token_stream(&arm.sub_tree);
             quote!(#arm_lit => { #inner_tokens })
         })
         .collect();
@@ -133,15 +162,17 @@ fn decode_branch(
     let catch_all = match arms.len().cmp(&expected_arms) {
         Ordering::Less => match any_sub_tree {
             // The default case is covered by a default arm provided by the user
-            Some(any_sub_tree) => state.build_token_stream(&*any_sub_tree),
+            Some(any_sub_tree) => state.clone().build_token_stream(&*any_sub_tree),
 
             None => {
                 let error = format!(
-                    "Not all cases covered for mask: {} ({})",
+                    "Not all cases covered for sub-tree: {}, mask = {} ({})",
+                    state.debug_string(),
                     bits_to_string(mask),
                     mask.len()
                 );
-                quote!(compile_error!(#error))
+                // quote!(compile_error!(#error))
+                quote!(panic!(#error))
             }
         },
 

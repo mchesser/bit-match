@@ -39,18 +39,6 @@ impl Parse for BitMatchInput {
             else if lookahead.peek(kw::pattern) {
                 symbol_table.parse_pattern_def(&mut input)?;
             }
-            // else if lookahead.peek(Token![_]) {
-            //     if let Some(_entry) = fall_through {
-            //         // TODO: include the span of `entry` in the error message
-            //         return Err(input.error("Only one fallthrough case may be specified"));
-            //     }
-
-            //     input.parse::<Token![_]>()?;
-            //     input.parse::<Token![=>]>()?;
-
-            //     fall_through = Some(input.parse()?);
-            //     parse_optional_comma(&mut input);
-            // }
             else {
                 matches.push(MatchEntry::parse(&mut input, &symbol_table)?);
                 parse_optional_comma(&mut input);
@@ -198,6 +186,23 @@ pub struct BitSlice {
     pub shift: usize,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MaskState {
+    Fixed,
+    Variable,
+    Any,
+}
+
+impl MaskState {
+    pub fn and(self, other: Self) -> MaskState {
+        match (self, other) {
+            (Self::Fixed, Self::Fixed) => Self::Fixed,
+            (Self::Any, other) | (other, Self::Any) => other,
+            (Self::Variable, _) | (_, Self::Variable) => Self::Variable,
+        }
+    }
+}
+
 /// Represents a fully parsed match arm
 pub struct MatchEntry {
     /// Tracks which bits are fixed (mask[i] == true) and which are variable (mask[i] == false)
@@ -251,6 +256,14 @@ impl MatchEntry {
             }
         }
         output
+    }
+
+    pub fn mask_iter<'a>(&'a self) -> impl Iterator<Item = MaskState> + 'a {
+        self.mask.iter().zip(&self.any_mask).map(|x| match x {
+            (true, true) => MaskState::Any,
+            (true, false) => MaskState::Fixed,
+            _ => MaskState::Variable,
+        })
     }
 
     /// Truncates the mask of this entry to the position of the final fixed bit.

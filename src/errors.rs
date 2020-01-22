@@ -1,23 +1,7 @@
-use std::collections::BTreeMap;
-
 use proc_macro2::Span;
 use syn::Error;
 
-use crate::{
-    helpers::{bits_to_string, group_by},
-    MatchEntry,
-};
-
-pub fn overlapping_variable(groups: &BTreeMap<&[bool], Vec<&MatchEntry>>) -> Error {
-    let mut error = Error::new(Span::call_site(), format!("No unique fixed bits within group"));
-    for (key, entries) in groups {
-        let msg = format!("Note: mask = {} ({})", bits_to_string(key), key.len());
-        for entry in entries {
-            error.combine(Error::new(entry.match_span, msg.clone()));
-        }
-    }
-    error
-}
+use crate::{helpers::group_by, MatchEntry};
 
 pub fn overlapping_fixed(items: &[&MatchEntry]) -> Error {
     // Group entries by fixed bits so we can determine which entries actually overlap
