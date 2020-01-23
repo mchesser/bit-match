@@ -2,7 +2,7 @@
 
 A procedural macro for matching fixed bits and extracting variable bits from a bit-stream.
 
-### Example
+## Example
 
 ```rust
 /// Disassembles the instruction at `offset` in `bytes`
@@ -46,10 +46,6 @@ fn disasm(bytes: &[u8], offset: &mut usize) -> String {
         // an inline variable is automatically created for each group of variable bits with the same
         // character, with length defined based on the number of times the character is repeated
         1010 aaaa => format!("jz {}", a),
-        1011 xxxx => format!("invalid"),
-        1100 xxxx => format!("invalid"),
-        1101 xxxx => format!("invalid"),
-        1110 xxxx => format!("invalid"),
 
         // Fixed bits can be named constants
         const LOAD_IMM = 1111;
@@ -57,9 +53,38 @@ fn disasm(bytes: &[u8], offset: &mut usize) -> String {
         // Global symbols are allowed in pattern substitution
         pattern loadi(opcode, imm) => (LOAD_IMM opcode dst imm);
         loadi(00, imm8) => format!("li r{}, #{}", dst, imm8),
-        loadi(01, imm8) => format!("li r{}, #{}", dst, imm8),
+        loadi(01, imm8) => format!("lu r{}, #{}", dst, imm8),
         loadi(10, imm16) => format!("li r{}, #{}", dst, imm16),
-        loadi(11, imm16) => format!("li r{}, #{}", dst, imm16),
+        loadi(11, imm16) => format!("lu r{}, #{}", dst, imm16),
+
+        // The `_` character can be used to define a default case for bits
+        ____ ____ => format!("invalid"),
     }
-}
+```
+
+## Features
+
+### Overlap checking
+
+Bit-match checks for cases where bits overlap any where within the tree, e.g.:
+
+```
+error: 2 matches overlap when mask is 000000
+error: Match is 111111xxxxxxxxxxxxxxxxxx here:
+   |
+65 |         loadi(11, imm16) => format!("li r{}, #{}", dst, imm16),
+   |         ^^^^^
+error: Match is 11111100 here:
+   |
+67 |         1111 1100 => format!("overlapping"),
+   |         ^^^^^^^^^
+```
+
+### Exhaustiveness checking
+
+Bit-match checks for cases where there are bits still left to match, and there are no default case
+
+```
+error: Not all cases covered for: ???????__________001_____0010011
+error: Not all cases covered for: ???????__________101_____0010011
 ```

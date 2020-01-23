@@ -193,16 +193,6 @@ pub enum MaskState {
     Any,
 }
 
-impl MaskState {
-    pub fn and(self, other: Self) -> MaskState {
-        match (self, other) {
-            (Self::Fixed, Self::Fixed) => Self::Fixed,
-            (Self::Any, other) | (other, Self::Any) => other,
-            (Self::Variable, _) | (_, Self::Variable) => Self::Variable,
-        }
-    }
-}
-
 /// Represents a fully parsed match arm
 pub struct MatchEntry {
     /// Tracks which bits are fixed (mask[i] == true) and which are variable (mask[i] == false)
@@ -266,13 +256,15 @@ impl MatchEntry {
         })
     }
 
-    /// Truncates the mask of this entry to the position of the final fixed bit.
-    ///
-    /// This is used to ensure that variable length instructions with the same fixed bits are mapped
-    /// to the same mask.
-    pub fn truncated_mask(&self) -> &[bool] {
-        let last_fixed_bit = self.mask.iter().rposition(|&p| p).unwrap_or(0);
-        &self.mask[..=last_fixed_bit]
+    pub fn current_mask(&self, used_bits: &[bool]) -> Vec<bool> {
+        let fixed_bits: Vec<_> = match self.has_fixed_bits(&used_bits) {
+            true => self.mask_iter().map(|x| x == MaskState::Fixed).collect(),
+            false => self.mask_iter().map(|x| x == MaskState::Any).collect(),
+        };
+
+        let mut unused_bits = crate::bit_not(&used_bits);
+        unused_bits.resize(fixed_bits.len(), true);
+        crate::bit_and(&fixed_bits, &unused_bits)
     }
 
     pub fn matches(&self, key: &[bool], mask: &[bool]) -> bool {
@@ -284,24 +276,26 @@ impl MatchEntry {
         true
     }
 
-    /// Checks whether all bits for a particular mask are `any` bits
-    pub fn all_any(&self, mask: &[bool]) -> bool {
-        for (&mask_bit, &any_bit) in mask.iter().zip(self.any_mask.iter()) {
-            if mask_bit && !any_bit {
-                return false;
+    /// Checks whether the are any remaining fixed bits
+    pub fn has_fixed_bits(&self, used_bits: &[bool]) -> bool {
+        for (bit, is_used) in
+            self.mask_iter().zip(used_bits.iter().chain(std::iter::repeat(&false)))
+        {
+            if !is_used && bit == MaskState::Fixed {
+                return true;
             }
         }
-        true
+        false
     }
 
     /// Checks whether there are `any` bits for a particular mask
-    pub fn is_fixed(&self, mask: &[bool]) -> bool {
+    pub fn has_any_bits(&self, mask: &[bool]) -> bool {
         for (&mask_bit, &any_bit) in mask.iter().zip(self.any_mask.iter()) {
             if mask_bit && any_bit {
-                return false;
+                return true;
             }
         }
-        true
+        false
     }
 
     /// Extract all `fixed` bits for a given mask

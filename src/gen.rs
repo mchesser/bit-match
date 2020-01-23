@@ -18,13 +18,20 @@ pub(crate) struct DecoderState<'a> {
     /// Stores expressions that can be used to retrieve bytes from some source.
     read_exprs: &'a [BitReader],
 
-    mask: Vec<bool>,
+    any_case_cover: usize,
+    used_bits: Vec<bool>,
     values: Vec<bool>,
 }
 
 impl<'a> DecoderState<'a> {
     pub fn new(input: &'a BitMatchInput) -> Self {
-        Self { subtree_values: vec![], read_exprs: &input.readers, mask: vec![], values: vec![] }
+        Self {
+            subtree_values: vec![],
+            read_exprs: &input.readers,
+            used_bits: vec![],
+            values: vec![],
+            any_case_cover: 0,
+        }
     }
 
     pub fn build_token_stream(self, tree: &MatchTree) -> TokenStream {
@@ -113,17 +120,22 @@ impl<'a> DecoderState<'a> {
         Some(parse_quote!(let #next_ident = #read_expr;))
     }
 
-    pub fn debug_string(&self) -> String {
+    fn debug_string(&self, mask: &[bool]) -> String {
+        if self.used_bits.is_empty() {
+            let mask_to_char = |x: &bool| if *x { '?' } else { '_' };
+            return mask.iter().map(mask_to_char).collect();
+        }
+
         let mut output = String::new();
-        for (&mask_bit, &value) in self.mask.iter().zip(self.values.iter()) {
-            if !mask_bit {
-                output.push('_');
-            }
-            else if value {
-                output.push('1');
+        let mask_iter = mask.iter().chain(std::iter::repeat(&false));
+        for ((&used_bit, &value), &mask_bit) in
+            self.used_bits.iter().zip(self.values.iter()).zip(mask_iter)
+        {
+            if used_bit {
+                output.push(if value { '1' } else { '0' });
             }
             else {
-                output.push('0');
+                output.push(if mask_bit { '?' } else { '_' });
             }
         }
         output
@@ -143,36 +155,38 @@ fn decode_branch(
         .iter()
         .map(|arm| {
             let mut new_state = state.clone();
-            new_state.mask.resize(state.mask.len().max(mask.len()), false);
-            new_state.values.resize(state.mask.len().max(mask.len()), false);
+            new_state.used_bits.resize(state.used_bits.len().max(mask.len()), false);
+            new_state.values.resize(state.used_bits.len().max(mask.len()), false);
             for i in 0..mask.len() {
                 if mask[i] {
-                    new_state.mask[i] = true;
+                    new_state.used_bits[i] = true;
                     new_state.values[i] = arm.key[i];
                 }
             }
 
+            let debug_string = new_state.debug_string(&[]);
             let arm_lit = bits_to_literal(&arm.key[first_bit(mask)..]);
             let inner_tokens = new_state.build_token_stream(&arm.sub_tree);
-            quote!(#arm_lit => { #inner_tokens })
+            quote!(
+                #[doc(#debug_string)]
+                #arm_lit => { #inner_tokens }
+            )
         })
         .collect();
 
     let expected_arms = 1 << crate::count_ones(mask);
-    let catch_all = match arms.len().cmp(&expected_arms) {
+    let catch_all = match (arms.len() + state.any_case_cover).cmp(&expected_arms) {
         Ordering::Less => match any_sub_tree {
             // The default case is covered by a default arm provided by the user
-            Some(any_sub_tree) => state.clone().build_token_stream(&*any_sub_tree),
+            Some(any_sub_tree) => {
+                let mut new_state = state.clone();
+                new_state.any_case_cover = arms.len();
+                new_state.build_token_stream(&*any_sub_tree)
+            }
 
             None => {
-                let error = format!(
-                    "Not all cases covered for sub-tree: {}, mask = {} ({})",
-                    state.debug_string(),
-                    bits_to_string(mask),
-                    mask.len()
-                );
-                // quote!(compile_error!(#error))
-                quote!(panic!(#error))
+                let error = format!("Not all cases covered for: {}", state.debug_string(mask));
+                quote!(compile_error!(#error))
             }
         },
 
@@ -195,6 +209,12 @@ fn decode_branch(
 }
 
 fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
+    // Check that all fixed bits have been covered at this node
+    if entry.has_fixed_bits(&state.used_bits) {
+        let error = format!("Not all cases covered for: {}", state.debug_string(&entry.mask));
+        return quote!(compile_error!(#error));
+    }
+
     // Variable bits may occur in data that we have yet to read, so we keep track of new the
     // read statements we need to perform here.
     let mut read_stmts: Vec<Stmt> = vec![];
@@ -220,11 +240,8 @@ fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
         variable_stmts.push(parse_quote!(let #ident = #(#values)|*;))
     }
 
-    let debug_string = entry.debug_string();
-
     let body = &entry.body;
     quote! {
-        #[doc(#debug_string)]
         #(#read_stmts)*
         #(#variable_stmts)*
         #body

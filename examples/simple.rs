@@ -83,10 +83,7 @@ fn decode(bytes: &[u8], offset: &mut usize) -> Instruction {
 
 
         pattern invalid(opcode) => (opcode);
-        invalid(____ __ 00) => Instruction::Invalid,
-        invalid(____ __ 01) => Instruction::Invalid,
-        invalid(____ __ 10) => Instruction::Invalid,
-        invalid(____ __ 11) => Instruction::Invalid,
+        invalid(____ __ __) => Instruction::Invalid,
     }
 }
 
