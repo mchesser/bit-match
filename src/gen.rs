@@ -121,16 +121,14 @@ impl<'a> DecoderState<'a> {
     }
 
     fn debug_string(&self, mask: &[bool]) -> String {
-        if self.used_bits.is_empty() {
-            let mask_to_char = |x: &bool| if *x { '?' } else { '_' };
-            return mask.iter().map(mask_to_char).collect();
-        }
+        let len = mask.len().max(self.used_bits.len()).max(self.values.len());
+        let mut output = String::with_capacity(len);
 
-        let mut output = String::new();
-        let mask_iter = mask.iter().chain(std::iter::repeat(&false));
-        for ((&used_bit, &value), &mask_bit) in
-            self.used_bits.iter().zip(self.values.iter()).zip(mask_iter)
-        {
+        for i in 0..len {
+            let mask_bit = *mask.get(i).unwrap_or(&false);
+            let used_bit = *self.used_bits.get(i).unwrap_or(&false);
+            let value = *self.values.get(i).unwrap_or(&false);
+
             if used_bit {
                 output.push(if value { '1' } else { '0' });
             }
@@ -138,6 +136,7 @@ impl<'a> DecoderState<'a> {
                 output.push(if mask_bit { '?' } else { '_' });
             }
         }
+
         output
     }
 }
@@ -175,7 +174,8 @@ fn decode_branch(
         .collect();
 
     let expected_arms = 1 << crate::count_ones(mask);
-    let catch_all = match (arms.len() + state.any_case_cover).cmp(&expected_arms) {
+    let covered_cases = arms.len() + state.any_case_cover;
+    let catch_all = match covered_cases.cmp(&expected_arms) {
         Ordering::Less => match any_sub_tree {
             // The default case is covered by a default arm provided by the user
             Some(any_sub_tree) => {
@@ -185,8 +185,24 @@ fn decode_branch(
             }
 
             None => {
-                let error = format!("Not all cases covered for: {}", state.debug_string(mask));
-                quote!(compile_error!(#error))
+                let error = format!(
+                    "{} out of {} cases not covered for: {}",
+                    expected_arms - covered_cases,
+                    expected_arms,
+                    state.debug_string(mask),
+                );
+
+                if expected_arms < 128 {
+                    let extended_error = find_missing_cases(mask, arms, &state);
+                    let error = format!(
+                        "{}\nnote: the following cases where not covered:\n{}",
+                        error, extended_error
+                    );
+                    quote!(compile_error!(#error))
+                }
+                else {
+                    quote!(compile_error!(#error))
+                }
             }
         },
 
@@ -206,6 +222,45 @@ fn decode_branch(
             _ => { #catch_all }
         }
     }
+}
+
+fn find_missing_cases(mask: &[bool], arms: &[MatchBranchArm], state: &DecoderState) -> String {
+    let count = 1 << crate::count_ones(mask);
+    let mut set: std::collections::BTreeSet<Vec<_>> = std::collections::BTreeSet::new();
+    for i in 0..count {
+        let mut value = Vec::with_capacity(mask.len());
+        let mut bits = i;
+        for &mask_bit in mask.iter().rev() {
+            if mask_bit {
+                value.push(if bits & 1 == 0 { false } else { true });
+                bits = bits >> 1;
+            }
+            else {
+                value.push(false);
+            }
+        }
+        set.insert(value.into_iter().rev().collect());
+    }
+
+    for arm in arms {
+        set.remove(&arm.key);
+    }
+
+    let mut output = Vec::with_capacity(set.len());
+    for entry in set {
+        let mut tmp_state = state.clone();
+        tmp_state.used_bits.resize(tmp_state.used_bits.len().max(mask.len()), false);
+        tmp_state.values.resize(tmp_state.used_bits.len().max(mask.len()), false);
+        for i in 0..mask.len() {
+            if mask[i] {
+                tmp_state.used_bits[i] = true;
+                tmp_state.values[i] = entry[i];
+            }
+        }
+        output.push(format!("\t{}", tmp_state.debug_string(&[])));
+    }
+
+    format!("{}", output.join("\n"))
 }
 
 fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
