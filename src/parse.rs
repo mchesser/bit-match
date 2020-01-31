@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use syn::parse::{Parse, ParseStream};
 use syn::{punctuated::Punctuated, Expr, Ident, LitInt, Result, Token};
 
-use crate::helpers::bits_to_string;
+use crate::helpers::{bits_to_string, bool_to_char};
 
 mod kw {
     syn::custom_keyword!(read);
@@ -228,24 +228,14 @@ impl std::fmt::Debug for MatchEntry {
 
 impl MatchEntry {
     pub fn debug_string(&self) -> String {
-        let mut output = String::new();
-        for ((&mask_bit, &fixed_bit), &any_bit) in
-            self.mask.iter().zip(self.fixed.iter()).zip(self.any_mask.iter())
-        {
-            if !mask_bit {
-                output.push('x');
-            }
-            else if any_bit {
-                output.push('_');
-            }
-            else if fixed_bit {
-                output.push('1');
-            }
-            else {
-                output.push('0');
-            }
-        }
-        output
+        self.mask_iter()
+            .zip(&self.fixed)
+            .map(|(state, &value)| match state {
+                MaskState::Fixed => bool_to_char(value),
+                MaskState::Variable => 'x',
+                MaskState::Any => '_',
+            })
+            .collect()
     }
 
     pub fn mask_iter<'a>(&'a self) -> impl Iterator<Item = MaskState> + 'a {
@@ -265,15 +255,6 @@ impl MatchEntry {
         let mut unused_bits = crate::bit_not(&used_bits);
         unused_bits.resize(fixed_bits.len(), true);
         crate::bit_and(&fixed_bits, &unused_bits)
-    }
-
-    pub fn matches(&self, key: &[bool], mask: &[bool]) -> bool {
-        for i in 0..mask.len() {
-            if mask[i] && !(key[i] == self.fixed[i] || self.any_mask[i]) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Checks whether the are any remaining fixed bits

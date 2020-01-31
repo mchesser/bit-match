@@ -15,9 +15,16 @@ where
 }
 
 /// Converts a bit vector (encoded as an array of bools) to a string of '0's and '1's
+pub fn bool_to_char(value: bool) -> char {
+    match value {
+        true => '1',
+        false => '0',
+    }
+}
+
+/// Converts a bit vector (encoded as an array of bools) to a string of '0's and '1's
 pub fn bits_to_string(bits: &[bool]) -> String {
-    let cond = |&x| if x { '1' } else { '0' };
-    bits.iter().map(cond).collect()
+    bits.iter().map(|&x| bool_to_char(x)).collect()
 }
 
 /// Finds the offset of the first true bit

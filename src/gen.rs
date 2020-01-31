@@ -36,8 +36,8 @@ impl<'a> DecoderState<'a> {
 
     pub fn build_token_stream(self, tree: &MatchTree) -> TokenStream {
         match tree {
-            MatchTree::Branch { mask, arms, any_sub_tree } => {
-                decode_branch(self, mask, &arms, any_sub_tree)
+            MatchTree::Branch { mask, arms, default_case } => {
+                decode_branch(self, mask, &arms, default_case)
             }
             MatchTree::Leaf(entry) => decode_leaf(self, entry),
         }
@@ -145,7 +145,7 @@ fn decode_branch(
     mut state: DecoderState,
     mask: &[bool],
     arms: &[MatchBranchArm],
-    any_sub_tree: &Option<Box<MatchTree>>,
+    default_case: &Option<Box<MatchTree>>,
 ) -> TokenStream {
     let (read_stmts, match_expr) = state.read_and_get(mask);
 
@@ -176,12 +176,12 @@ fn decode_branch(
     let expected_arms = 1 << crate::count_ones(mask);
     let covered_cases = arms.len() + state.any_case_cover;
     let catch_all = match covered_cases.cmp(&expected_arms) {
-        Ordering::Less => match any_sub_tree {
+        Ordering::Less => match default_case {
             // The default case is covered by a default arm provided by the user
-            Some(any_sub_tree) => {
+            Some(default_case) => {
                 let mut new_state = state.clone();
                 new_state.any_case_cover = arms.len();
-                new_state.build_token_stream(&*any_sub_tree)
+                new_state.build_token_stream(&*default_case)
             }
 
             None => {

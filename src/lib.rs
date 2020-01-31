@@ -56,15 +56,10 @@ impl<'a> std::fmt::Debug for MatchBranchArm<'a> {
 }
 
 impl<'a> MatchBranchArm<'a> {
-    fn new(
-        key: Vec<bool>,
-        entries: &[&'a MatchEntry],
-        used_bits: Vec<bool>,
-        depth: usize,
-    ) -> Result<Self> {
+    fn new(key: Vec<bool>, entries: &[&'a MatchEntry], used_bits: &[bool]) -> Result<Self> {
         Ok(match entries {
             [entry] => Self { key, sub_tree: MatchTree::Leaf(entry) },
-            _ => Self { key, sub_tree: MatchTree::build(entries, used_bits, depth)? },
+            _ => Self { key, sub_tree: MatchTree::build(entries, used_bits)? },
         })
     }
 }
@@ -73,7 +68,7 @@ enum MatchTree<'a> {
     Branch {
         mask: Vec<bool>,
         arms: Vec<MatchBranchArm<'a>>,
-        any_sub_tree: Option<Box<MatchTree<'a>>>,
+        default_case: Option<Box<MatchTree<'a>>>,
     },
     Leaf(&'a MatchEntry),
 }
@@ -81,30 +76,15 @@ enum MatchTree<'a> {
 impl<'a> std::fmt::Debug for MatchTree<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Branch { mask, arms, any_sub_tree } => {
+            Self::Branch { mask, arms, default_case } => {
                 f.write_str("Branch {")?;
                 write!(f, "mask: \"{}\", ", bits_to_string(mask))?;
                 write!(f, "arms: {:?}, ", arms)?;
-                write!(f, "any_sub_tree: {:?} }}", any_sub_tree)?;
+                write!(f, "default_case: {:?} }}", default_case)?;
             }
             Self::Leaf(entry) => write!(f, "Leaf ( {:?} )", entry)?,
         }
         Ok(())
-    }
-}
-
-fn update_used_bits(used_bits: &mut Vec<bool>, mask: &mut [bool]) {
-    used_bits.resize(used_bits.len().max(mask.len()), false);
-
-    // Zero out bits from the current mask that have already been matched, and keep
-    // track of bits that are newly matched in this subtree.
-    for (current, all) in mask.iter_mut().zip(used_bits.iter_mut()) {
-        if *all {
-            *current = false;
-        }
-        else if *current {
-            *all = true
-        }
     }
 }
 
@@ -130,15 +110,14 @@ fn shared_mask<'a>(entries: &[&'a MatchEntry], used_bits: &[bool]) -> Vec<bool> 
 
 impl<'a> MatchTree<'a> {
     pub(crate) fn new(input: &[&'a MatchEntry]) -> Result<Self> {
-        MatchTree::build(input, vec![], 0)
+        MatchTree::build(input, &[], 0)
     }
 
-    fn build(input: &[&'a MatchEntry], mut used_bits: Vec<bool>, depth: usize) -> Result<Self> {
+    fn build(input: &[&'a MatchEntry], used_bits: &[bool]) -> Result<Self> {
         assert!(!input.is_empty(), "Attempted to build match tree with no inputs");
 
         // Find fixed bits that are shared between all groups
-        let mut mask: Vec<_> = shared_mask(input, &used_bits);
-        update_used_bits(&mut used_bits, &mut mask);
+        let mask = shared_mask(input, used_bits);
 
         // Check if there are any remaining shared fixed bits to use
         if !mask.contains(&true) {
@@ -147,64 +126,94 @@ impl<'a> MatchTree<'a> {
             }
 
             // Discard any cases that entirely overlap with the current input
-            let fixed_inputs: Vec<_> =
-                input.iter().copied().filter(|x| !x.has_any_bits(&used_bits)).collect();
+            let all_fixed = |x: &MatchEntry| !x.has_any_bits(used_bits);
+            let fixed_inputs: Vec<_> = input.iter().copied().filter(|x| all_fixed(x)).collect();
 
             match fixed_inputs.len() {
-                0 => return Err(errors::overlapping_fixed(&input, &used_bits)),
-                1 => return MatchTree::build(&fixed_inputs, used_bits, depth + 1),
-                _ => return Err(errors::overlapping_fixed(&fixed_inputs, &used_bits)),
+                0 => return Err(errors::overlapping_fixed(&input, used_bits)),
+                1 => return MatchTree::build(&fixed_inputs, used_bits),
+                _ => return Err(errors::overlapping_fixed(&fixed_inputs, used_bits)),
             }
         }
 
-        // Generate match groups based on the fixed bits in the mask
-        let mut all_any = vec![];
-        let mut sub_matches: BTreeMap<Vec<bool>, Vec<&MatchEntry>> = BTreeMap::new();
-        for entry in input {
-            if entry.has_any_bits(&mask) {
-                all_any.push(*entry);
-            }
-            else {
-                let match_for_entry = entry.fixed_bits(&mask);
-                sub_matches.entry(match_for_entry).or_default().push(entry);
-            }
-        }
+        // Keep track of which bits will be used after we check this mask
+        let used_bits = bit_or(&used_bits, &mask);
 
-        let any_sub_tree = match !all_any.is_empty() {
-            true => Some(Box::new(MatchTree::build(&all_any, used_bits.clone(), depth + 1)?)),
-            false => None,
-        };
+        let (sub_matches, all_any) = group_by_mask(&input, &mask);
 
         // Create subtrees for each branch with fixed bits
         let mut arms = vec![];
         for (key, mut entries) in sub_matches {
-            for entry in &all_any {
-                if entry.matches(&key, &mask) {
-                    entries.push(*entry);
-                }
-            }
-            arms.push(MatchBranchArm::new(key, &entries, used_bits.clone(), depth + 1)?)
+            // Entries that consist entirely of any bits are also valid for every sub-branch, so
+            // need to be added to the list of entries for this branch
+            all_any.iter().for_each(|x| entries.push(*x));
+            arms.push(MatchBranchArm::new(key, &entries, &used_bits)?)
         }
 
-        Ok(MatchTree::Branch { mask, arms, any_sub_tree })
+        // Create sub-tree for the default case
+        let default_case = match !all_any.is_empty() {
+            true => Some(Box::new(MatchTree::build(&all_any, &used_bits)?)),
+            false => None,
+        };
+
+        Ok(MatchTree::Branch { mask, arms, default_case })
     }
+}
+
+/// Given a list of entries and a mask, group them by their value after the mask is applied
+///
+/// For each of the entires, the masked bits must either be entirely 'fixed' (i.e. have a concrete
+/// value that we can match against) or must consists of entirely 'any' bits
+///
+/// Fixed entries are grouped by the masked value, with cases with 'any' bits returned in their own
+/// group
+fn group_by_mask<'a>(
+    entries: &[&'a MatchEntry],
+    mask: &[bool],
+) -> (BTreeMap<Vec<bool>, Vec<&'a MatchEntry>>, Vec<&'a MatchEntry>) {
+    let mut all_any = vec![];
+    let mut sub_matches: BTreeMap<Vec<bool>, Vec<&MatchEntry>> = BTreeMap::new();
+    for &entry in entries {
+        match entry.has_any_bits(mask) {
+            true => all_any.push(entry),
+            false => sub_matches.entry(entry.fixed_bits(&mask)).or_default().push(entry),
+        }
+    }
+
+    (sub_matches, all_any)
 }
 
 /// Performs a bit-wise 'and' operation between two inputs. If the inputs are of different length,
 /// the result will be trancated to the size of the smallest input
 fn bit_and(a: &[bool], b: &[bool]) -> Vec<bool> {
-    let mut a: Vec<_> = a.into();
+    let mut a = a.to_vec();
 
     a.truncate(b.len());
-    for (self_bit, &mask_bit) in a.iter_mut().zip(b) {
-        if !mask_bit {
-            *self_bit = false;
+    for (a_bit, &b_bit) in a.iter_mut().zip(b) {
+        if !b_bit {
+            *a_bit = false;
         }
     }
 
     a
 }
 
+/// Performs a bit-wise 'or' operation between two inputs, if the inputs are of different length,
+/// then the result will be the length of the largest input
+fn bit_or(a: &[bool], b: &[bool]) -> Vec<bool> {
+    let mut a = a.to_vec();
+
+    a.resize(a.len().max(b.len()), false);
+    for (a_bit, b_bit) in a.iter_mut().zip(b) {
+        if *b_bit {
+            *a_bit = true
+        }
+    }
+
+    a
+}
+
+/// Performs a bit-wise `not` operation (invert) on an input
 fn bit_not(a: &[bool]) -> Vec<bool> {
     a.iter().map(|x| !*x).collect()
 }
