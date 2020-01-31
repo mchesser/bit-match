@@ -110,7 +110,7 @@ fn shared_mask<'a>(entries: &[&'a MatchEntry], used_bits: &[bool]) -> Vec<bool> 
 
 impl<'a> MatchTree<'a> {
     pub(crate) fn new(input: &[&'a MatchEntry]) -> Result<Self> {
-        MatchTree::build(input, &[], 0)
+        MatchTree::build(input, &[])
     }
 
     fn build(input: &[&'a MatchEntry], used_bits: &[bool]) -> Result<Self> {
