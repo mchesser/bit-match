@@ -36,3 +36,23 @@ pub fn first_bit(bits: &[bool]) -> usize {
 pub fn get_mask(offset: usize, len: usize) -> Vec<bool> {
     std::iter::repeat(false).take(offset).chain(std::iter::repeat(true).take(len)).collect()
 }
+
+#[allow(dead_code)]
+pub fn debug_key(key: &[bool], used: &[bool]) -> String {
+    let len = used.len().max(key.len());
+    let mut output = String::with_capacity(len);
+
+    for i in 0..len {
+        let used_bit = *used.get(i).unwrap_or(&false);
+        let value = *key.get(i).unwrap_or(&false);
+
+        if used_bit {
+            output.push(if value { '1' } else { '0' });
+        }
+        else {
+            output.push('_');
+        }
+    }
+
+    output
+}

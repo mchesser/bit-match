@@ -247,7 +247,7 @@ impl MatchEntry {
     }
 
     pub fn current_mask(&self, used_bits: &[bool]) -> Vec<bool> {
-        let fixed_bits: Vec<_> = match self.has_fixed_bits(&used_bits) {
+        let fixed_bits: Vec<_> = match self.unused_fixed_bits(&used_bits) {
             true => self.mask_iter().map(|x| x == MaskState::Fixed).collect(),
             false => self.mask_iter().map(|x| x == MaskState::Any).collect(),
         };
@@ -258,11 +258,23 @@ impl MatchEntry {
     }
 
     /// Checks whether the are any remaining fixed bits
-    pub fn has_fixed_bits(&self, used_bits: &[bool]) -> bool {
+    pub fn unused_fixed_bits(&self, used_bits: &[bool]) -> bool {
         for (bit, is_used) in
             self.mask_iter().zip(used_bits.iter().chain(std::iter::repeat(&false)))
         {
             if !is_used && bit == MaskState::Fixed {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks whether the are any remaining any bits
+    pub fn unused_any_bits(&self, used_bits: &[bool]) -> bool {
+        for (bit, is_used) in
+            self.mask_iter().zip(used_bits.iter().chain(std::iter::repeat(&false)))
+        {
+            if !is_used && bit == MaskState::Any {
                 return true;
             }
         }
@@ -277,6 +289,11 @@ impl MatchEntry {
             }
         }
         false
+    }
+
+    /// Counts the total number of any-bits for this entry
+    pub fn total_any_bits(&self) -> usize {
+        self.any_mask.iter().filter(|x| **x).count()
     }
 
     /// Extract all `fixed` bits for a given mask

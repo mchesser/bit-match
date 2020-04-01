@@ -265,7 +265,7 @@ fn find_missing_cases(mask: &[bool], arms: &[MatchBranchArm], state: &DecoderSta
 
 fn decode_leaf(mut state: DecoderState, entry: &MatchEntry) -> TokenStream {
     // Check that all fixed bits have been covered at this node
-    if entry.has_fixed_bits(&state.used_bits) {
+    if entry.unused_fixed_bits(&state.used_bits) {
         let error = format!("Not all cases covered for: {}", state.debug_string(&entry.mask));
         return quote!(compile_error!(#error));
     }

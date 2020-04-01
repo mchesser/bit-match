@@ -121,19 +121,21 @@ impl<'a> MatchTree<'a> {
 
         // Check if there are any remaining shared fixed bits to use
         if !mask.contains(&true) {
-            if input.len() == 1 {
-                return Ok(MatchTree::Leaf(input[0]));
-            }
-
-            // Discard any cases that entirely overlap with the current input
+            // Discard branches with placeholder bits that entirely overlap with the current input
+            // @TODO: consider generating a warning if the discarded branch was never used.
             let all_fixed = |x: &MatchEntry| !x.has_any_bits(used_bits);
             let fixed_inputs: Vec<_> = input.iter().copied().filter(|x| all_fixed(x)).collect();
 
-            match fixed_inputs.len() {
-                0 => return Err(errors::overlapping_fixed(&input, used_bits)),
-                1 => return MatchTree::build(&fixed_inputs, used_bits),
-                _ => return Err(errors::overlapping_fixed(&fixed_inputs, used_bits)),
-            }
+            return match fixed_inputs.len() {
+                // All entries contain any bits, so pick the most specific one
+                0 => Ok(MatchTree::Leaf(input.iter().max_by_key(|x| x.total_any_bits()).unwrap())),
+
+                // There is exactly one entry that consists of only fixed bits
+                1 => Ok(MatchTree::Leaf(fixed_inputs[0])),
+
+                // There is more than one fixed branch
+                _ => Err(errors::overlapping_fixed(&fixed_inputs, used_bits)),
+            };
         }
 
         // Keep track of which bits will be used after we check this mask
@@ -145,9 +147,14 @@ impl<'a> MatchTree<'a> {
         let mut arms = vec![];
         for (key, mut entries) in sub_matches {
             // Entries that consist entirely of any bits are also valid for every sub-branch, so
-            // need to be added to the list of entries for this branch
-            all_any.iter().for_each(|x| entries.push(*x));
-            arms.push(MatchBranchArm::new(key, &entries, &used_bits)?)
+            // need to be added to the list of entries for this branch unless there are no
+            // remaining fixed, or any bits
+            all_any
+                .iter()
+                .filter(|x| x.unused_fixed_bits(&used_bits) || x.unused_any_bits(&used_bits))
+                .for_each(|x| entries.push(*x));
+
+            arms.push(MatchBranchArm::new(key.clone(), &entries, &used_bits)?);
         }
 
         // Create sub-tree for the default case
