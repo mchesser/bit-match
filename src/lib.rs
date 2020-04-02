@@ -99,7 +99,9 @@ fn shared_mask<'a>(entries: &[&'a MatchEntry], used_bits: &[bool]) -> Vec<bool> 
         if crate::DEBUG {
             eprintln!("Mask for: {} is: {}", entry.debug_string(), bits_to_string(&entry_mask));
         }
-        mask = mask.into_iter().zip(entry_mask).map(|(a, b)| a & b).collect();
+        if entry.unused_fixed_bits(used_bits) {
+            mask = mask.into_iter().zip(entry_mask).map(|(a, b)| a & b).collect();
+        }
     }
 
     while mask.last() == Some(&false) {

@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
-pub fn group_by<K, V>(
-    iter: impl IntoIterator<Item = V>,
+pub fn group_by<'a, K, V>(
+    iter: impl IntoIterator<Item = &'a V>,
     mut get_key: impl FnMut(&V) -> K,
-) -> BTreeMap<K, Vec<V>>
+) -> BTreeMap<K, Vec<&'a V>>
 where
     K: Ord,
 {
     let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for item in iter {
-        groups.entry(get_key(&item)).or_default().push(item);
+        groups.entry(get_key(item)).or_default().push(item);
     }
     groups
 }
