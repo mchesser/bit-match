@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use syn::parse::{Parse, ParseStream};
 use syn::{punctuated::Punctuated, Expr, Ident, LitInt, Result, Token};
 
-use crate::helpers::{bits_to_string, bool_to_char};
+use crate::helpers::bool_to_char;
 
 mod kw {
     syn::custom_keyword!(read);
@@ -216,13 +216,9 @@ pub struct MatchEntry {
 
 impl std::fmt::Debug for MatchEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("MatchEntry { ")?;
-        write!(f, "mask: {}, ", bits_to_string(&self.mask))?;
-        write!(f, "fixed: {}, ", bits_to_string(&self.fixed))?;
-        write!(f, "variable: {:?}, ", self.variable)?;
-        write!(f, "any_mask: {}, ", bits_to_string(&self.any_mask))?;
-        write!(f, "body: () }}")?;
-        Ok(())
+        f.write_str("\"")?;
+        f.write_str(&self.debug_string())?;
+        f.write_str("\"")
     }
 }
 
