@@ -6,6 +6,7 @@ use syn::{parse_quote, Expr, Ident, LitInt, Stmt, Type};
 
 use crate::{
     helpers::{bits_to_string, first_bit, get_mask},
+    parse::InternalErrorHandler,
     BitMatchInput, BitReader, MatchBranchArm, MatchEntry, MatchTree,
 };
 
@@ -15,11 +16,17 @@ pub(crate) struct DecoderState<'a> {
     /// a previous subtree level
     subtree_values: Vec<(usize, Ident)>,
 
-    /// Stores expressions that can be used to retrieve bytes from some source.
+    /// Expressions that can be used to retrieve bytes from some source.
     read_exprs: &'a [BitReader],
 
-    any_case_cover: usize,
+    /// The expression that should be injected whenever the decoder generates a state that should
+    /// be unreachable, but might not be due to bugs in this library
+    internal_error_handler: &'a Option<InternalErrorHandler>,
+
+    /// Which bits have been used in higher parts of the tree
     used_bits: Vec<bool>,
+
+    /// The value of fixed bits in higher parts of the tree
     values: Vec<bool>,
 }
 
@@ -28,9 +35,9 @@ impl<'a> DecoderState<'a> {
         Self {
             subtree_values: vec![],
             read_exprs: &input.readers,
+            internal_error_handler: &input.internal_error_handler,
             used_bits: vec![],
             values: vec![],
-            any_case_cover: 0,
         }
     }
 
@@ -174,15 +181,11 @@ fn decode_branch(
         .collect();
 
     let expected_arms = 1 << crate::count_ones(mask);
-    let covered_cases = arms.len() + state.any_case_cover;
+    let covered_cases = arms.len();
     let catch_all = match covered_cases.cmp(&expected_arms) {
         Ordering::Less => match default_case {
             // The default case is covered by a default arm provided by the user
-            Some(default_case) => {
-                let mut new_state = state.clone();
-                new_state.any_case_cover = arms.len();
-                new_state.build_token_stream(&*default_case)
-            }
+            Some(default_case) => state.clone().build_token_stream(&*default_case),
 
             None => {
                 let error = format!(
@@ -208,10 +211,22 @@ fn decode_branch(
 
         // All cases are covered, however the compiler doesn't know this, so generate an
         // unreachable expression (this should be optimized away)
-        Ordering::Equal => quote!(unreachable!()),
+        Ordering::Equal => {
+            let msg = format!("expected: {} arms and {} are covered", expected_arms, covered_cases);
+            match state.internal_error_handler.as_ref() {
+                Some(handler) => {
+                    let expr = &handler.expr;
+                    quote!({
+                        let internal_error = #msg;
+                        #expr
+                    })
+                }
+                None => quote!(unreachable!("[bit-match internal error]: {}", #msg)),
+            }
+        }
 
         // This should have already been checked during the construction of the tree
-        Ordering::Greater => unreachable!("Generated a match statement with too many arms"),
+        Ordering::Greater => panic!("Generated a match statement with too many arms"),
     };
 
     quote! {

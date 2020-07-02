@@ -6,6 +6,7 @@ use syn::{punctuated::Punctuated, Expr, Ident, LitInt, Result, Token};
 use crate::helpers::bool_to_char;
 
 mod kw {
+    syn::custom_keyword!(internal_error);
     syn::custom_keyword!(read);
     syn::custom_keyword!(var);
     syn::custom_keyword!(pattern);
@@ -14,6 +15,7 @@ mod kw {
 /// The fully parsed bit match input
 #[derive(Debug, Default)]
 pub struct BitMatchInput {
+    pub internal_error_handler: Option<InternalErrorHandler>,
     pub readers: Vec<BitReader>,
     pub matches: Vec<MatchEntry>,
 }
@@ -22,6 +24,7 @@ impl Parse for BitMatchInput {
     fn parse(mut input: ParseStream) -> Result<Self> {
         let mut readers = vec![];
         let mut matches = vec![];
+        let mut internal_error_expr = None;
 
         let mut symbol_table = SymbolTable::default();
 
@@ -29,6 +32,9 @@ impl Parse for BitMatchInput {
             let lookahead = input.lookahead1();
             if lookahead.peek(kw::read) {
                 readers.push(input.parse()?)
+            }
+            else if lookahead.peek(kw::internal_error) {
+                internal_error_expr = Some(input.parse()?);
             }
             else if lookahead.peek(Token![const]) {
                 symbol_table.parse_const(&mut input)?;
@@ -51,13 +57,31 @@ impl Parse for BitMatchInput {
             return Err(input.error("Expected at least 1 reader expression"));
         }
 
-        Ok(Self { readers, matches })
+        Ok(Self { internal_error_handler: internal_error_expr, readers, matches })
     }
 }
 
 fn parse_optional_comma(input: &mut ParseStream) {
     if input.peek(Token![,]) {
         input.parse::<Token![,]>().unwrap();
+    }
+}
+
+/// A statement of the form: `internal_error => <expr>;` used for injecting an expression whenever
+/// there is an internal error
+#[derive(Debug)]
+pub struct InternalErrorHandler {
+    pub expr: Expr,
+}
+
+impl Parse for InternalErrorHandler {
+    fn parse(input: ParseStream) -> Result<Self> {
+        input.parse::<kw::internal_error>()?;
+        input.parse::<Token![=>]>()?;
+        let expr = input.parse::<Expr>()?;
+        input.parse::<Token![;]>()?;
+
+        Ok(Self {  expr })
     }
 }
 
